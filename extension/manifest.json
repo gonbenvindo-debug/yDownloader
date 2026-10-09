@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "yDownloader",
-  "version": "1.0.0",
-  "description": "Escolhe a resolução e descarrega o vídeo do YouTube.",
+  "version": "2.0.0",
+  "description": "Descarrega vídeos do YouTube diretamente no browser, sem servidor.",
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",
@@ -18,9 +18,17 @@
       "128": "icons/icon128.png"
     }
   },
-  "permissions": ["downloads"],
-  "host_permissions": ["http://127.0.0.1/*"],
-  "background": { "service_worker": "service-worker.js" },
+  "permissions": ["downloads", "storage"],
+  "host_permissions": [
+    "https://youtube.com/*",
+    "https://*.youtube.com/*",
+    "https://youtubei.googleapis.com/*",
+    "https://*.googlevideo.com/*"
+  ],
+  "background": { "service_worker": "service-worker.js", "type": "module" },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';"
+  },
   "content_scripts": [{
     "matches": ["https://www.youtube.com/*", "https://m.youtube.com/*"],
     "js": ["content.js"],

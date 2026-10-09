@@ -10,7 +10,6 @@ let downloadIcon;
 let spinnerIcon;
 let downloading = false;
 let activeDownloadId = null;
-let readingQuality = false;
 
 function getVideoId() {
   const url = new URL(location.href);
@@ -58,34 +57,6 @@ function resizePopup() {
   const height = Math.min(panel.scrollHeight, innerHeight * .5, 360);
   popup.style.height = `${height}px`;
   panel.style.height = popup.style.height;
-}
-
-function readResolutions() {
-  const player = document.querySelector('.html5-video-player');
-  const settings = player?.querySelector('.ytp-settings-button');
-  const panel = player?.querySelector('.ytp-settings-menu[data-layer]');
-  if (!settings || !panel) return [];
-  const wasOpen = getComputedStyle(panel).display !== 'none';
-  readingQuality = true;
-  try {
-    const read = () => [...new Set([...panel.querySelectorAll('[role="menuitemradio"]')]
-      .map(item => Number(/(\d{3,4})p/i.exec(item.textContent)?.[1]))
-      .filter(Boolean))].sort((a, b) => a - b);
-    let resolutions = read();
-    if (resolutions.length) {
-      if (wasOpen) settings.click();
-      return resolutions;
-    }
-    if (wasOpen) settings.click();
-    settings.click();
-    [...panel.querySelectorAll('.ytp-menuitem[aria-haspopup="true"]')]
-      .find(item => /\d{3,4}p/i.test(item.querySelector('.ytp-menuitem-content')?.textContent ?? ''))?.click();
-    resolutions = read();
-    settings.click();
-    return resolutions;
-  } finally {
-    readingQuality = false;
-  }
 }
 
 function createPopup() {
@@ -150,7 +121,8 @@ function addResolution(resolution) {
   option.className = 'ytp-menuitem';
   option.type = 'button';
   option.setAttribute('role', 'menuitem');
-  option.textContent = `${resolution}p`;
+  const modeLabel = resolution.mode === 'merge' ? ' · juntar no browser' : '';
+  option.textContent = `${resolution.height}p (${resolution.extension.toUpperCase()}${modeLabel})`;
   option.addEventListener('click', async () => {
     if (option.disabled || downloading) return;
     const videoId = currentVideoId;
@@ -159,8 +131,12 @@ function addResolution(resolution) {
     closePopup();
     setDownloading(true);
     let result;
-    try { result = await chrome.runtime.sendMessage({ type: 'download', videoId, videoTitle, resolution }); }
+    try { result = await chrome.runtime.sendMessage({ type: 'download', videoId, videoTitle, resolution: resolution.height }); }
     catch { result = { error: 'Não foi possível iniciar o download.' }; }
+    if (result?.opened) {
+      setDownloading(false);
+      return;
+    }
     if (result?.error || !Number.isInteger(result?.downloadId)) {
       setDownloading(false);
       if (videoId !== currentVideoId) return;
@@ -175,7 +151,7 @@ function addResolution(resolution) {
   menu.append(option);
 }
 
-function togglePopup() {
+async function togglePopup() {
   if (downloading) return;
   if (popup.style.display === 'block') {
     closePopup();
@@ -185,12 +161,18 @@ function togglePopup() {
   button.setAttribute('aria-expanded', 'true');
   menu.replaceChildren();
   const videoId = currentVideoId;
-  let resolutions;
-  try { resolutions = readResolutions(); }
-  catch { resolutions = []; }
+  setStatus('A procurar formatos disponíveis…');
+  let result;
+  try { result = await chrome.runtime.sendMessage({ type: 'get-resolutions', videoId }); }
+  catch { result = { error: 'Não foi possível consultar os formatos do vídeo.' }; }
   if (videoId !== currentVideoId || popup.style.display !== 'block') return;
+  if (result?.error) {
+    setStatus(result.error);
+    return;
+  }
+  const resolutions = Array.isArray(result?.resolutions) ? result.resolutions : [];
   if (!resolutions.length) {
-    setStatus('Não foi possível ler as resoluções do player.');
+    setStatus('Não há formatos de download compatíveis para este vídeo.');
     return;
   }
   setStatus('');
@@ -223,6 +205,6 @@ new MutationObserver(() => {
 document.addEventListener('yt-navigate-finish', syncPlayer);
 document.addEventListener('keydown', event => { if (event.key === 'Escape') closePopup(); });
 document.addEventListener('click', event => {
-  if (!readingQuality && popup?.style.display === 'block' && !popup.contains(event.target) && !button.contains(event.target)) closePopup();
+  if (popup?.style.display === 'block' && !popup.contains(event.target) && !button.contains(event.target)) closePopup();
 });
 syncPlayer();

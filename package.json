@@ -1,12 +1,21 @@
 {
   "name": "ydownloader",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "scripts": {
-    "start": "node server.mjs"
+    "build": "node build.mjs"
   },
   "type": "module",
   "engines": {
     "node": ">=22"
+  },
+  "dependencies": {
+    "@jitl/quickjs-wasmfile-release-sync": "0.32.0",
+    "mediabunny": "1.61.3",
+    "quickjs-emscripten-core": "0.32.0",
+    "youtubei.js": "18.1.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
   }
 }
