@@ -1,10 +1,17 @@
-import { copyFile, mkdir } from 'node:fs/promises';
+import { cp, copyFile, mkdir, rm } from 'node:fs/promises';
 import { build } from 'esbuild';
-import { join } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 const root = import.meta.dirname;
 const extension = join(root, 'extension');
 const licenses = join(extension, 'third-party-licenses');
+const outputsRoot = resolve(root, '..', '..', 'outputs');
+const unpackedOutput = resolve(outputsRoot, 'yDownloader');
+const outputRelativePath = relative(outputsRoot, unpackedOutput);
+if (outputRelativePath === '..' || outputRelativePath.startsWith(`..${sep}`) || isAbsolute(outputRelativePath)) {
+  throw new Error('O destino da extensão tem de ficar dentro da pasta outputs.');
+}
+
 await mkdir(licenses, { recursive: true });
 const common = {
   bundle: true,
@@ -48,4 +55,8 @@ await Promise.all([
   copyFile(join(root, 'node_modules', 'meriyah', 'LICENSE.md'), join(licenses, 'meriyah-ISC.txt')),
 ]);
 
-console.log('Extensão compilada em extension/.');
+await rm(unpackedOutput, { recursive: true, force: true });
+await mkdir(dirname(unpackedOutput), { recursive: true });
+await cp(extension, unpackedOutput, { recursive: true });
+
+console.log(`Extensão compilada em extension/ e atualizada em ${unpackedOutput}.`);
