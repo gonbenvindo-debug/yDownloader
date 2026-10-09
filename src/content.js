@@ -1,4 +1,4 @@
-import { requestPlayerSnapshot } from './player-client.js';
+import { createPlayerReader } from './player-reader.js';
 
 const buttonId = 'yt-downloader-button';
 const popupId = 'yt-downloader-popup';
@@ -13,17 +13,7 @@ let spinnerIcon;
 let downloading = false;
 let activeDownloadId = null;
 let menuPlayerData = null;
-
-async function readPlayerData(videoId) {
-  for (let attempt = 0; attempt < 10; attempt++) {
-    if (videoId !== getVideoId()) return null;
-    const snapshot = await requestPlayerSnapshot(videoId);
-    if (snapshot && (snapshot.qualities?.length || snapshot.streamingData?.formats?.length
-      || snapshot.streamingData?.adaptiveFormats?.length)) return snapshot;
-    if (attempt < 9) await new Promise(resolve => setTimeout(resolve, 150));
-  }
-  return null;
-}
+const readPlayerData = createPlayerReader();
 
 function getVideoId() {
   const url = new URL(location.href);
@@ -183,7 +173,7 @@ async function togglePopup() {
   button.setAttribute('aria-expanded', 'true');
   menu.replaceChildren();
   const videoId = currentVideoId;
-  setStatus('A ler as resoluções do player…');
+  setStatus('A ler as resoluções do vídeo…');
   let result;
   try {
     const playerData = await readPlayerData(videoId);
@@ -199,7 +189,7 @@ async function togglePopup() {
   }
   const resolutions = Array.isArray(result?.resolutions) ? result.resolutions : [];
   if (!resolutions.length) {
-    setStatus('Não há formatos de download compatíveis para este vídeo.');
+    setStatus('O YouTube não forneceu resoluções de vídeo. Atualiza a página e tenta novamente.');
     return;
   }
   setStatus('');

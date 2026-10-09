@@ -6,6 +6,15 @@ const formatFields = [
   'url', 'signatureCipher', 'cipher', 'isDrc', 'isAutoDubbed', 'isDescriptive',
   'isDubbed', 'isOriginal', 'isSecondary', 'drmTrackType', 'fairPlayKeyUri',
 ];
+const fieldAliases = {
+  mimeType: 'mime_type', qualityLabel: 'quality_label', averageBitrate: 'average_bitrate',
+  audioQuality: 'audio_quality', audioBitrate: 'audio_bitrate', audioSampleRate: 'audio_sample_rate',
+  audioChannels: 'audio_channels', contentLength: 'content_length', approxDurationMs: 'approx_duration_ms',
+  lastModified: 'last_modified_ms', signatureCipher: 'signature_cipher', isDrc: 'is_drc',
+  isAutoDubbed: 'is_auto_dubbed', isDescriptive: 'is_descriptive', isDubbed: 'is_dubbed',
+  isOriginal: 'is_original', isSecondary: 'is_secondary', drmTrackType: 'drm_track_type',
+  fairPlayKeyUri: 'fair_play_key_uri',
+};
 
 function safely(read) {
   try { return read(); } catch { return undefined; }
@@ -13,11 +22,11 @@ function safely(read) {
 
 function asResponse(value) {
   if (typeof value === 'string') value = safely(() => JSON.parse(value));
-  return value?.playerResponse ?? value;
+  return value?.playerResponse ?? value?.player_response ?? value;
 }
 
 export function parseInlinePlayerResponse(text) {
-  const assignment = /\bytInitialPlayerResponse\s*=\s*/.exec(text);
+  const assignment = /(?:\bytInitialPlayerResponse|window\s*\[\s*["']ytInitialPlayerResponse["']\s*\])\s*=\s*/.exec(text);
   if (!assignment) return null;
   const start = assignment.index + assignment[0].length;
   if (text[start] !== '{') return null;
@@ -42,18 +51,69 @@ export function parseInlinePlayerResponse(text) {
 function copyFormat(format) {
   const result = {};
   for (const key of formatFields) {
-    const value = format[key];
+    const value = format[key] ?? format[fieldAliases[key]];
     if (typeof value === 'string') result[key] = value.slice(0, 32_000);
     else if (typeof value === 'boolean' || typeof value === 'number' && Number.isFinite(value)) result[key] = value;
   }
-  if (format.audioTrack) {
+  const track = format.audioTrack ?? format.audio_track;
+  if (track) {
     result.audioTrack = {
-      id: String(format.audioTrack.id ?? '').slice(0, 200),
-      audioIsDefault: format.audioTrack.audioIsDefault === true,
+      id: String(track.id ?? '').slice(0, 200),
+      audioIsDefault: (track.audioIsDefault ?? track.audio_is_default) === true,
     };
   }
-  if (Array.isArray(format.drmFamilies)) result.drmFamilies = format.drmFamilies.filter(value => typeof value === 'string');
+  const drmFamilies = format.drmFamilies ?? format.drm_families;
+  if (Array.isArray(drmFamilies)) result.drmFamilies = drmFamilies.filter(value => typeof value === 'string');
   return result;
+}
+
+export function snapshotFromPlayerResponse(value, videoId) {
+  const response = asResponse(value);
+  const details = response?.videoDetails ?? response?.video_details ?? response?.basic_info;
+  if ((details?.videoId ?? details?.video_id ?? details?.id) !== videoId) return null;
+  const streaming = response.streamingData ?? response.streaming_data ?? {};
+  const formats = values => Array.isArray(values) ? values.slice(0, 300).filter(Boolean).map(copyFormat) : [];
+  return {
+    videoId,
+    title: String(details.title ?? '').slice(0, 500),
+    durationSeconds: Number(details.lengthSeconds ?? details.duration) || 0,
+    qualities: [],
+    streamingData: {
+      formats: formats(streaming.formats),
+      adaptiveFormats: formats(streaming.adaptiveFormats ?? streaming.adaptive_formats),
+      serverAbrStreamingUrl: streaming.serverAbrStreamingUrl ?? streaming.server_abr_streaming_url,
+    },
+  };
+}
+
+// Enrich partial getter responses with the complete page response. Never mix video IDs.
+export function mergePlayerSnapshots(videoId, ...snapshots) {
+  const current = snapshots.filter(value => value?.videoId === videoId);
+  if (!current.length) return null;
+  const qualities = new Map();
+  const formats = new Map();
+  const adaptiveFormats = new Map();
+  let title = '';
+  let durationSeconds = 0;
+  let serverAbrStreamingUrl;
+  for (const snapshot of current) {
+    title = snapshot.title || title;
+    durationSeconds = snapshot.durationSeconds || durationSeconds;
+    serverAbrStreamingUrl = snapshot.streamingData?.serverAbrStreamingUrl || serverAbrStreamingUrl;
+    for (const quality of snapshot.qualities ?? []) qualities.set(Number(quality.height), quality);
+    for (const [name, target] of [['formats', formats], ['adaptiveFormats', adaptiveFormats]]) {
+      for (const format of snapshot.streamingData?.[name] ?? []) {
+        const key = `${format.itag ?? `${format.height}:${format.qualityLabel}`}:${format.audioTrack?.id ?? ''}:${format.isDrc === true}`;
+        const fields = Object.fromEntries(Object.entries(format).filter(([, value]) => value !== undefined && value !== ''));
+        target.set(key, { ...target.get(key), ...fields });
+      }
+    }
+  }
+  return {
+    videoId, title, durationSeconds,
+    qualities: [...qualities.values()].sort((a, b) => a.height - b.height),
+    streamingData: { formats: [...formats.values()], adaptiveFormats: [...adaptiveFormats.values()], serverAbrStreamingUrl },
+  };
 }
 
 function qualityHeight(quality, label) {
@@ -74,16 +134,15 @@ export function collectPlayerSnapshot({ window, document }, videoId) {
     safely(() => watch?.playerData),
     safely(() => window.ytInitialPlayerResponse),
     safely(() => window.ytplayer?.config?.args?.player_response),
-  ].map(asResponse).filter(response => response?.videoDetails?.videoId === videoId);
+  ].map(response => snapshotFromPlayerResponse(response, videoId)).filter(Boolean);
 
-  if (!candidates.length) {
-    for (const script of document.scripts ?? []) {
-      const response = parseInlinePlayerResponse(script.textContent ?? '');
-      if (response?.videoDetails?.videoId === videoId) { candidates.push(response); break; }
-    }
+  // A nonempty getter response can contain only audio or a reduced format list.
+  // Inline JSON must still be considered in that case.
+  for (const script of document.scripts ?? []) {
+    const snapshot = snapshotFromPlayerResponse(parseInlinePlayerResponse(script.textContent ?? ''), videoId);
+    if (snapshot) candidates.push(snapshot);
   }
-  const response = candidates.find(value => value.streamingData?.formats?.length || value.streamingData?.adaptiveFormats?.length)
-    ?? candidates[0];
+  const snapshot = mergePlayerSnapshots(videoId, ...candidates);
   const qualities = new Map();
   // During adverts or SPA navigation, the player may still belong to another video.
   if (videoData?.video_id === videoId) {
@@ -96,17 +155,9 @@ export function collectPlayerSnapshot({ window, document }, videoId) {
       if (height && !qualities.has(height)) qualities.set(height, { height, quality, label: `${height}p` });
     }
   }
-  if (!response && !qualities.size) return null;
-  const streaming = response?.streamingData ?? {};
-  return {
-    videoId,
-    title: String(response?.videoDetails?.title ?? videoData?.title ?? '').slice(0, 500),
-    durationSeconds: Number(response?.videoDetails?.lengthSeconds) || 0,
+  if (!snapshot && !qualities.size) return null;
+  return mergePlayerSnapshots(videoId, snapshot, {
+    videoId, title: String(videoData?.video_id === videoId ? videoData.title ?? '' : '').slice(0, 500),
     qualities: [...qualities.values()].sort((a, b) => a.height - b.height),
-    streamingData: {
-      formats: (streaming.formats ?? []).slice(0, 300).map(copyFormat),
-      adaptiveFormats: (streaming.adaptiveFormats ?? []).slice(0, 300).map(copyFormat),
-      serverAbrStreamingUrl: streaming.serverAbrStreamingUrl,
-    },
-  };
+  });
 }

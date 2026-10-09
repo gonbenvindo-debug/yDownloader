@@ -3,7 +3,7 @@ import { VideoPlaybackAbrRequest } from 'googlevideo/protos';
 import { buildSabrFormat } from 'googlevideo/utils';
 import { newQuickJSWASMModuleFromVariant, shouldInterruptAfterDeadline } from 'quickjs-emscripten-core';
 import QUICKJS_RELEASE from '@jitl/quickjs-wasmfile-release-sync';
-import { normalizePlayerSnapshot, resolutionHeight } from './player-data.js';
+import { hasDrm, normalizePlayerSnapshot, resolutionHeight } from './player-data.js';
 
 const videoIdPattern = /^[\w-]{11}$/;
 const clientTypes = ['ANDROID_VR', 'VISIONOS', 'WEB'];
@@ -225,9 +225,8 @@ function getSabrQualityPlan(info, height) {
 async function getResolutionsForTab(videoId, playerData) {
   const snapshot = normalizePlayerSnapshot(playerData, videoId);
   if (!snapshot) throw new Error('Não foi possível ler este vídeo no player. Atualiza a página e tenta novamente.');
-  const { info, nativeHeights } = snapshot;
-  const formats = [...info.streaming_data.formats, ...info.streaming_data.adaptive_formats];
-  const heights = new Set([...nativeHeights, ...formats.map(resolutionHeight)]
+  const { info, nativeHeights, videoHeights } = snapshot;
+  const heights = new Set([...nativeHeights, ...videoHeights]
     .filter(height => Number.isInteger(height) && height >= 72 && height <= 8640));
   // Reading resolutions never makes a new request to YouTube.
   return [...heights].sort((a, b) => a - b).map(height => {
@@ -235,9 +234,9 @@ async function getResolutionsForTab(videoId, playerData) {
     if (directPlan) return { height, mode: directPlan.mode, extension: directPlan.extension };
     const sabrPlan = getSabrQualityPlan(info, height);
     if (sabrPlan) return { height, mode: 'sabr', extension: sabrPlan.extension };
-    if (formats.some(format => resolutionHeight(format) === height && hasDrm(format))) return null;
-    return nativeHeights.includes(height) ? { height, mode: 'player', extension: null } : null;
-  }).filter(Boolean);
+    // Match the original yt-dlp menu: list video heights before choosing the audio pair.
+    return { height, mode: 'player', extension: null };
+  });
 }
 
 function codecFamilies(format) {
@@ -258,11 +257,6 @@ function codecFamilies(format) {
 
 function codecFamily(format) {
   return codecFamilies(format)[0] ?? null;
-}
-
-function hasDrm(format) {
-  const drmTrackType = String(format.drm_track_type ?? '').toLowerCase();
-  return Boolean(format.drm_families?.length || (drmTrackType && !drmTrackType.endsWith('_none')) || format.fair_play_key_uri);
 }
 
 function hasMediaReference(format) {
@@ -463,8 +457,14 @@ async function startDownload(videoId, videoTitle, height, mode, tabId, playerDat
   const localInfo = normalizePlayerSnapshot(playerData, videoId)?.info;
   const localDirectPlan = localInfo && getQualityPlan(localInfo, height);
   const localSabrPlan = localInfo && getSabrQualityPlan(localInfo, height);
-  if (mode === 'sabr' || !localDirectPlan && localSabrPlan) {
-    const session = await getSabrSession(tabId, videoId);
+  const session = localSabrPlan || mode === 'sabr' ? await getSabrSession(tabId, videoId) : null;
+  const requiresDecipher = localDirectPlan && [localDirectPlan.format, localDirectPlan.video, localDirectPlan.audio]
+    .filter(Boolean).some(format => format.signature_cipher || format.cipher
+      || format.url && new URL(format.url).searchParams.has('n'));
+  // A signed progressive URL may require a failing API request. The active SABR
+  // session already has the authorization needed for the same resolution.
+  if (localSabrPlan && (!localDirectPlan || mode === 'sabr' || requiresDecipher && session)
+    || mode === 'sabr' && !localDirectPlan) {
     if (!session) throw new Error('A sessão do player expirou. Reproduz o vídeo e volta a tentar.');
     const info = localSabrPlan ? localInfo : (await getSabrVideoInfo(videoId)).info;
     const plan = getSabrQualityPlan(info, height);

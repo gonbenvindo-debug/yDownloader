@@ -6,6 +6,7 @@ import { collectPlayerSnapshot, parseInlinePlayerResponse } from '../src/player-
 import { normalizePlayerSnapshot, resolutionHeight } from '../src/player-data.js';
 import { requestPlayerSnapshot } from '../src/player-client.js';
 import { PLAYER_REQUEST, PLAYER_RESPONSE } from '../src/player-protocol.js';
+import { createPlayerReader } from '../src/player-reader.js';
 
 const videoId = 'jNQXAC9IVRw';
 const otherId = 'dQw4w9WgXcQ';
@@ -76,6 +77,79 @@ test('native quality levels work when the raw response is not exposed', () => {
   } }), videoId);
   assert.deepEqual(snapshot.qualities.map(value => value.height), [360, 1080, 2160]);
   assert.deepEqual(snapshot.streamingData.adaptiveFormats, []);
+});
+
+test('partial player getters do not hide the complete inline video formats', () => {
+  const partial = response(videoId);
+  partial.streamingData.adaptiveFormats = [partial.streamingData.adaptiveFormats[1]];
+  const snapshot = collectPlayerSnapshot(environment({
+    player: {getPlayerResponse: () => partial},
+    scripts: [`window["ytInitialPlayerResponse"] = ${JSON.stringify(response(videoId))};`],
+  }), videoId);
+  assert.equal(snapshot.streamingData.adaptiveFormats.length, 2);
+  assert.deepEqual(normalizePlayerSnapshot(snapshot, videoId).videoHeights, [240]);
+});
+
+test('video heights survive missing audio, codecs and numeric string itags', () => {
+  const data = normalizePlayerSnapshot({videoId, streamingData:{adaptiveFormats:[
+    {itag:'137',mimeType:'video/mp4',height:'1080',qualityLabel:'1080p'},
+    {height:720,qualityLabel:'720p'},
+    {itag:140,mimeType:'audio/mp4',height:480},
+  ]}}, videoId);
+  assert.deepEqual(data.videoHeights, [1080,720]);
+  assert.equal(data.info.streaming_data.adaptive_formats[0].itag, 137);
+});
+
+test('a failed MAIN bridge falls back to script text without a network request', async () => {
+  const read = createPlayerReader({
+    pageWindow:{location:{origin:'https://www.youtube.com'}},
+    pageDocument:environment({scripts:[`var ytInitialPlayerResponse=${JSON.stringify(response(videoId))};`]}).document,
+    readBridge:async()=>{throw new Error('bridge timed out');},
+    fetchImpl:async()=>{throw new Error('should not fetch');},
+  });
+  const snapshot = await read(videoId);
+  assert.deepEqual(normalizePlayerSnapshot(snapshot,videoId).videoHeights,[240]);
+});
+
+test('an incomplete SPA player reads the current watch HTML on the same origin', async () => {
+  let calls=0;
+  const read = createPlayerReader({
+    pageWindow:{location:{origin:'https://www.youtube.com'}},
+    pageDocument:environment({scripts:[`var ytInitialPlayerResponse=${JSON.stringify(response(otherId))};`]}).document,
+    readBridge:async()=>({videoId,qualities:[{height:240}],streamingData:{}}),
+    fetchImpl:async(url,options)=>{
+      calls++;
+      assert.equal(url,`https://www.youtube.com/watch?v=${videoId}`);
+      assert.equal(options.credentials,'same-origin');
+      return {ok:true,url,text:async()=>`<script>var ytInitialPlayerResponse=${JSON.stringify(response(videoId))};</script>`};
+    },
+  });
+  const snapshot=await read(videoId);
+  assert.equal(snapshot.streamingData.adaptiveFormats.length,2);
+  assert.equal((await read(videoId)).streamingData.adaptiveFormats.length,2);
+  assert.equal(calls,1);
+});
+
+test('native resolutions remain usable when both HTML fetching and MAIN fail', async () => {
+  const read = createPlayerReader({
+    pageWindow:{location:{origin:'https://www.youtube.com'}},pageDocument:environment().document,
+    readBridge:async()=>({videoId,qualities:[{height:1080}],streamingData:{}}),
+    fetchImpl:async()=>{throw new TypeError('Failed to fetch');},
+  });
+  assert.deepEqual(normalizePlayerSnapshot(await read(videoId),videoId).nativeHeights,[1080]);
+});
+
+test('HTML from a different video and consent redirects cannot provide download data', async () => {
+  const options={
+    pageWindow:{location:{origin:'https://www.youtube.com'}},pageDocument:environment().document,
+    readBridge:async()=>null,
+  };
+  await assert.rejects(createPlayerReader({...options,fetchImpl:async()=>({
+    ok:true,text:async()=>`var ytInitialPlayerResponse=${JSON.stringify(response(otherId))};`,
+  })})(videoId),/não forneceu os formatos/);
+  await assert.rejects(createPlayerReader({...options,fetchImpl:async()=>({
+    ok:true,url:'https://consent.youtube.com/',text:async()=>'',
+  })})(videoId),/consentimento/);
 });
 
 test('portrait labels select 1080p while preserving the true dimensions for SABR', () => {

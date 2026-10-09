@@ -1,5 +1,6 @@
 import test, { beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { VideoPlaybackAbrRequest, StreamerContext, ClientInfo } from 'googlevideo/protos';
 
 const videoId = 'jNQXAC9IVRw';
 const sender = {url:`https://www.youtube.com/watch?v=${videoId}`,tab:{id:42}};
@@ -21,7 +22,7 @@ globalThis.chrome = {
     sendMessage: async message => { sabrJob = message; return {accepted:true}; },
   },
   webRequest: {onBeforeRequest:event('request')},
-  tabs: {onRemoved:event('removed'),get:async()=>sender.tab,create:async options=>{opened=options;return{id:43};}},
+  tabs: {onRemoved:event('removed'),get:async()=>({...sender.tab,url:sender.url}),create:async options=>{opened=options;return{id:43};}},
   storage: {session:{
     get: async key => { storageReads++; return key === null ? {...stored} : {[key]:stored[key]}; },
     set: async data => Object.assign(stored,data),
@@ -72,6 +73,25 @@ test('native-only qualities are shown without requiring stream extraction', asyn
   assert.equal(fetchCalls,0);
 });
 
+test('the original menu contract lists video resolutions before an audio pair exists', async () => {
+  const snapshot={videoId,qualities:[],streamingData:{adaptiveFormats:[
+    {itag:'137',height:'1080',qualityLabel:'1080p',mimeType:'video/mp4'},
+    {itag:'136',height:720,qualityLabel:'720p',mimeType:'video/mp4; codecs="avc1.64001F"'},
+  ]}};
+  const result=await message({type:'get-resolutions',playerData:snapshot});
+  assert.deepEqual(result.resolutions,[
+    {height:720,mode:'player',extension:null},{height:1080,mode:'player',extension:null},
+  ]);
+  assert.equal(fetchCalls,0);
+});
+
+test('a protected format does not suppress an unprotected format at the same height', async () => {
+  const snapshot=sabrSnapshot();
+  snapshot.streamingData.adaptiveFormats.push({...snapshot.streamingData.adaptiveFormats[0],itag:999,drmFamilies:['WIDEVINE']});
+  const result=await message({type:'get-resolutions',playerData:snapshot});
+  assert.deepEqual(result.resolutions.map(value=>value.height),[144,240]);
+});
+
 test('stale metadata cannot return resolutions for another video', async () => {
   const result=await message({type:'get-resolutions',playerData:{...sabrSnapshot(),videoId:'dQw4w9WgXcQ'}});
   assert.match(result.error,/ler este vídeo/);
@@ -107,6 +127,40 @@ test('SABR transfer preparation reuses page metadata and the captured playback s
   assert.equal(sabrJob.sabr.audioFormat.itag,140);
   assert.equal(sabrJob.sabr.durationMs,19000);
   assert.ok(opened.url.startsWith('chrome-extension://test/download.html?task='));
+  assert.equal(fetchCalls,0);
+});
+
+test('a real protobuf playback request provides the session used for download preparation', async () => {
+  const request=VideoPlaybackAbrRequest.decode(new Uint8Array());
+  request.videoPlaybackUstreamerConfig=new Uint8Array([1,2,3]);
+  request.streamerContext=StreamerContext.decode(new Uint8Array());
+  request.streamerContext.poToken=new Uint8Array(32).fill(7);
+  request.streamerContext.clientInfo=ClientInfo.decode(new Uint8Array());
+  Object.assign(request.streamerContext.clientInfo,{clientName:1,clientVersion:'2.20261009.00.00'});
+  const body=VideoPlaybackAbrRequest.encode(request).finish();
+  await events.request({
+    tabId:42,initiator:'https://www.youtube.com',
+    url:'https://r1.test.googlevideo.com/videoplayback?sabr=1&rn=10',
+    requestBody:{raw:[{bytes:body.buffer.slice(body.byteOffset,body.byteOffset+body.byteLength)}]},
+  });
+  assert.equal(stored['sabr-session:42'].videoId,videoId);
+  assert.ok(!stored['sabr-session:42'].serverAbrStreamingUrl.includes('rn='));
+  const result=await message({type:'download',resolution:240,mode:'sabr',playerData:sabrSnapshot()});
+  assert.deepEqual(result,{opened:true});
+  assert.equal(sabrJob.sabr.poToken,stored['sabr-session:42'].poToken);
+  assert.equal(fetchCalls,0);
+});
+
+test('a ciphered progressive format can reuse SABR instead of the failing extraction API', async () => {
+  const snapshot=sabrSnapshot();
+  snapshot.streamingData.formats=[{
+    itag:18,height:240,qualityLabel:'240p',mimeType:'video/mp4; codecs="avc1.42001E, mp4a.40.2"',
+    signatureCipher:'url=https%3A%2F%2Fr1.test.googlevideo.com%2Fvideoplayback%3Fitag%3D18&s=test',
+  }];
+  stored['sabr-session:42']={videoId,capturedAt:Date.now(),serverAbrStreamingUrl:'https://r1.test.googlevideo.com/videoplayback?sabr=1',poToken:'test-token',videoPlaybackUstreamerConfig:'test-config',clientInfo:{clientName:1}};
+  const result=await message({type:'download',resolution:240,mode:'direct',playerData:snapshot});
+  assert.deepEqual(result,{opened:true});
+  assert.equal(sabrJob.sabr.videoFormat.itag,133);
   assert.equal(fetchCalls,0);
 });
 

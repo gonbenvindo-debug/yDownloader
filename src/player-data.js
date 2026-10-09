@@ -11,39 +11,51 @@ function number(value, fallback = 0) {
 }
 
 export function resolutionHeight(format) {
-  return Number(/^(\d{2,4})p(?:\b|\d)/i.exec(format.quality_label ?? '')?.[1]) || format.height;
+  return Number(/^(\d{2,4})p(?:\b|\d)/i.exec(format.quality_label ?? format.qualityLabel ?? '')?.[1]) || number(format.height);
 }
 
 function normalizeFormat(raw) {
-  if (!raw || !Number.isInteger(raw.itag) || typeof raw.mimeType !== 'string'
-    || !/^(?:video|audio)\/(?:mp4|webm)\s*;/i.test(raw.mimeType)) return null;
+  const itag = number(raw?.itag);
+  const mime = raw?.mimeType ?? raw?.mime_type;
+  if (!Number.isInteger(itag) || itag <= 0 || typeof mime !== 'string'
+    || !/^(?:video|audio)\/(?:mp4|webm)(?:\s*;|$)/i.test(mime)) return null;
+  const value = (camel, snake) => raw[camel] ?? raw[snake];
   const format = {
-    itag: raw.itag, mime_type: raw.mimeType.slice(0, 500),
+    itag, mime_type: mime.slice(0, 500),
     width: number(raw.width), height: number(raw.height),
-    bitrate: number(raw.bitrate), average_bitrate: number(raw.averageBitrate),
-    quality: raw.quality, quality_label: raw.qualityLabel,
-    audio_quality: raw.audioQuality, audio_channels: number(raw.audioChannels),
-    approx_duration_ms: number(raw.approxDurationMs), content_length: number(raw.contentLength),
-    last_modified_ms: String(raw.lastModified ?? '0'), xtags: raw.xtags,
-    is_drc: raw.isDrc === true, is_auto_dubbed: raw.isAutoDubbed === true,
-    is_descriptive: raw.isDescriptive === true, is_dubbed: raw.isDubbed === true,
-    is_original: raw.isOriginal === true, is_secondary: raw.isSecondary === true,
-    drm_families: Array.isArray(raw.drmFamilies) ? raw.drmFamilies : [],
-    drm_track_type: raw.drmTrackType, fair_play_key_uri: raw.fairPlayKeyUri,
+    bitrate: number(raw.bitrate), average_bitrate: number(value('averageBitrate', 'average_bitrate')),
+    quality: raw.quality, quality_label: raw.qualityLabel ?? raw.quality_label,
+    audio_quality: value('audioQuality', 'audio_quality'), audio_channels: number(value('audioChannels', 'audio_channels')),
+    approx_duration_ms: number(value('approxDurationMs', 'approx_duration_ms')), content_length: number(value('contentLength', 'content_length')),
+    last_modified_ms: String(value('lastModified', 'last_modified_ms') ?? '0'), xtags: raw.xtags,
+    is_drc: value('isDrc', 'is_drc') === true, is_auto_dubbed: value('isAutoDubbed', 'is_auto_dubbed') === true,
+    is_descriptive: value('isDescriptive', 'is_descriptive') === true, is_dubbed: value('isDubbed', 'is_dubbed') === true,
+    is_original: value('isOriginal', 'is_original') === true, is_secondary: value('isSecondary', 'is_secondary') === true,
+    drm_families: value('drmFamilies', 'drm_families') ?? [],
+    drm_track_type: value('drmTrackType', 'drm_track_type'), fair_play_key_uri: value('fairPlayKeyUri', 'fair_play_key_uri'),
     has_text: false, url: mediaUrl(raw.url),
   };
-  format.has_video = raw.mimeType.startsWith('video/') && (format.height > 0 || Boolean(raw.qualityLabel));
-  format.has_audio = raw.mimeType.startsWith('audio/') || Boolean(raw.audioQuality || raw.audioBitrate)
-    || /\b(?:mp4a|opus|vorbis)/i.test(raw.mimeType);
+  format.has_video = /^video\//i.test(mime) && (format.height > 0 || Boolean(format.quality_label));
+  format.has_audio = /^audio\//i.test(mime) || Boolean(format.audio_quality || value('audioBitrate', 'audio_bitrate'))
+    || /\b(?:mp4a|opus|vorbis)/i.test(mime);
   for (const [rawKey, key] of [['signatureCipher', 'signature_cipher'], ['cipher', 'cipher']]) {
-    if (typeof raw[rawKey] === 'string' && raw[rawKey].length < 32_000
-      && mediaUrl(new URLSearchParams(raw[rawKey]).get('url'))) format[key] = raw[rawKey];
+    const cipher = raw[rawKey] ?? raw[key];
+    if (typeof cipher === 'string' && cipher.length < 32_000
+      && mediaUrl(new URLSearchParams(cipher).get('url'))) format[key] = cipher;
   }
-  if (raw.audioTrack) format.audio_track = {
-    id: String(raw.audioTrack.id ?? '').slice(0, 200),
-    audio_is_default: raw.audioTrack.audioIsDefault === true,
+  const track = raw.audioTrack ?? raw.audio_track;
+  if (track) format.audio_track = {
+    id: String(track.id ?? '').slice(0, 200),
+    audio_is_default: (track.audioIsDefault ?? track.audio_is_default) === true,
   };
   return format;
+}
+
+export function hasDrm(format) {
+  const type = String(format.drmTrackType ?? format.drm_track_type ?? '').toLowerCase();
+  return Boolean((format.drmFamilies ?? format.drm_families)?.length
+    || (type && type !== 'none' && type !== '0' && !type.endsWith('_none'))
+    || format.fairPlayKeyUri || format.fair_play_key_uri);
 }
 
 export function normalizePlayerSnapshot(snapshot, videoId) {
@@ -51,9 +63,18 @@ export function normalizePlayerSnapshot(snapshot, videoId) {
   const streaming = snapshot.streamingData ?? {};
   const formats = values => Array.isArray(values) ? values.slice(0, 300).map(normalizeFormat).filter(Boolean) : [];
   const nativeHeights = [...new Set((Array.isArray(snapshot.qualities) ? snapshot.qualities : [])
-    .map(quality => quality.height).filter(height => Number.isInteger(height) && height >= 72 && height <= 8640))];
+    .map(quality => number(quality.height)).filter(height => Number.isInteger(height) && height >= 72 && height <= 8640))];
+  const rawValues = values => Array.isArray(values) ? values.slice(0, 300).filter(raw => raw && typeof raw === 'object') : [];
+  const rawVideoFormats = [...rawValues(streaming.formats), ...rawValues(streaming.adaptiveFormats)].filter(raw => {
+    const mime = raw?.mimeType ?? raw?.mime_type ?? '';
+    return !/^audio\//i.test(mime) && resolutionHeight(raw ?? {}) > 0;
+  });
+  const videoHeights = [...new Set(rawVideoFormats.filter(raw => !hasDrm(raw)).map(resolutionHeight))]
+    .filter(height => Number.isInteger(height) && height >= 72 && height <= 8640);
+  const protectedHeights = rawVideoFormats.filter(hasDrm).map(resolutionHeight).filter(height => !videoHeights.includes(height));
   return {
-    nativeHeights,
+    nativeHeights: nativeHeights.filter(height => !protectedHeights.includes(height)),
+    videoHeights,
     info: {
       basic_info: { title: String(snapshot.title ?? '').slice(0, 500), duration: number(snapshot.durationSeconds) },
       streaming_data: {
