@@ -24,6 +24,18 @@ const common = {
 await Promise.all([
   build({
     ...common,
+    entryPoints: [join(root, 'src', 'content.js')],
+    outfile: join(extension, 'content.js'),
+    format: 'iife',
+  }),
+  build({
+    ...common,
+    entryPoints: [join(root, 'src', 'player-bridge.js')],
+    outfile: join(extension, 'player-bridge.js'),
+    format: 'iife',
+  }),
+  build({
+    ...common,
     entryPoints: [join(root, 'src', 'service-worker.js')],
     outfile: join(extension, 'service-worker.js'),
     format: 'esm',

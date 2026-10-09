@@ -3,6 +3,7 @@ import { VideoPlaybackAbrRequest } from 'googlevideo/protos';
 import { buildSabrFormat } from 'googlevideo/utils';
 import { newQuickJSWASMModuleFromVariant, shouldInterruptAfterDeadline } from 'quickjs-emscripten-core';
 import QUICKJS_RELEASE from '@jitl/quickjs-wasmfile-release-sync';
+import { normalizePlayerSnapshot, resolutionHeight } from './player-data.js';
 
 const videoIdPattern = /^[\w-]{11}$/;
 const clientTypes = ['ANDROID_VR', 'VISIONOS', 'WEB'];
@@ -190,7 +191,7 @@ function toSabrFormat(format) {
 
 function getSabrQualityPlan(info, height) {
   const formats = info.streaming_data?.adaptive_formats ?? [];
-  const videoFormats = formats.filter(format => format.height === height && format.has_video
+  const videoFormats = formats.filter(format => resolutionHeight(format) === height && format.has_video
     && !format.has_audio && !format.has_text && !hasDrm(format));
   const audioFormats = formats.filter(format => format.has_audio && !format.has_video
     && !format.has_text && !hasDrm(format));
@@ -221,42 +222,22 @@ function getSabrQualityPlan(info, height) {
   };
 }
 
-async function getResolutionsForTab(videoId, tabId) {
-  let resolutions = [];
-  let directError;
-  try {
-    const { info } = await getVideoInfo(videoId);
-    resolutions = getAvailableResolutions(info).map(resolution => ({ ...resolution, mode: resolution.mode }));
-  } catch (error) {
-    directError = error;
-  }
-
-  let session = null;
-  try {
-    session = await getSabrSession(tabId, videoId);
-  } catch {
-    // SABR is an optional route; storage/session issues must not hide direct formats.
-  }
-  if (!session) {
-    if (resolutions.length) return resolutions;
-    throw directError ?? new Error('Reproduz o vídeo neste separador para ativar a transferência SABR.');
-  }
-
-  try {
-    const { info } = await getSabrVideoInfo(videoId);
-    const heights = new Set((info.streaming_data.adaptive_formats ?? [])
-      .map(format => format.height)
-      .filter(height => Number.isInteger(height) && height > 0));
-    const sabrResolutions = [...heights].sort((a, b) => a - b).map(height => {
-      const plan = getSabrQualityPlan(info, height);
-      return plan && { height, mode: 'sabr', extension: plan.extension };
-    }).filter(Boolean);
-    resolutions.push(...sabrResolutions);
-  } catch (error) {
-    if (!resolutions.length) throw error;
-  }
-  return resolutions.sort((a, b) => a.height - b.height
-    || Number(a.mode === 'sabr') - Number(b.mode === 'sabr'));
+async function getResolutionsForTab(videoId, playerData) {
+  const snapshot = normalizePlayerSnapshot(playerData, videoId);
+  if (!snapshot) throw new Error('Não foi possível ler este vídeo no player. Atualiza a página e tenta novamente.');
+  const { info, nativeHeights } = snapshot;
+  const formats = [...info.streaming_data.formats, ...info.streaming_data.adaptive_formats];
+  const heights = new Set([...nativeHeights, ...formats.map(resolutionHeight)]
+    .filter(height => Number.isInteger(height) && height >= 72 && height <= 8640));
+  // Reading resolutions never makes a new request to YouTube.
+  return [...heights].sort((a, b) => a - b).map(height => {
+    const directPlan = getQualityPlan(info, height);
+    if (directPlan) return { height, mode: directPlan.mode, extension: directPlan.extension };
+    const sabrPlan = getSabrQualityPlan(info, height);
+    if (sabrPlan) return { height, mode: 'sabr', extension: sabrPlan.extension };
+    if (formats.some(format => resolutionHeight(format) === height && hasDrm(format))) return null;
+    return nativeHeights.includes(height) ? { height, mode: 'player', extension: null } : null;
+  }).filter(Boolean);
 }
 
 function codecFamilies(format) {
@@ -310,9 +291,9 @@ function isProgressive(format) {
 }
 
 function getQualityPlan(info, height) {
-  const streamData = info.streaming_data;
+  const streamData = info.streaming_data ?? {};
   const combined = (streamData.formats ?? [])
-    .filter(format => format.height === height && isProgressive(format))
+    .filter(format => resolutionHeight(format) === height && isProgressive(format))
     .sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0));
   if (combined.length) {
     const format = combined[0];
@@ -320,7 +301,7 @@ function getQualityPlan(info, height) {
   }
 
   const videoFormats = (streamData.adaptive_formats ?? [])
-    .filter(format => format.height === height && format.has_video && !format.has_audio
+    .filter(format => resolutionHeight(format) === height && format.has_video && !format.has_audio
       && !format.has_text && !hasDrm(format) && hasMediaReference(format));
   const audioFormats = (streamData.adaptive_formats ?? [])
     .filter(format => format.has_audio && !format.has_video
@@ -344,10 +325,10 @@ function getQualityPlan(info, height) {
 }
 
 function getAvailableResolutions(info) {
-  const streamData = info.streaming_data;
+  const streamData = info.streaming_data ?? {};
   const heights = new Set([
-    ...(streamData.formats ?? []).map(format => format.height),
-    ...(streamData.adaptive_formats ?? []).map(format => format.height),
+    ...(streamData.formats ?? []).map(resolutionHeight),
+    ...(streamData.adaptive_formats ?? []).map(resolutionHeight),
   ].filter(height => Number.isInteger(height) && height > 0));
 
   return [...heights]
@@ -370,7 +351,16 @@ function safeFilename(value, fallback) {
 }
 
 async function decipher(format, client) {
-  const value = new URL(await format.decipher(client.session.player));
+  let rawUrl = format.url;
+  const needsPlayer = client || format.signature_cipher || format.cipher
+    || rawUrl && new URL(rawUrl).searchParams.has('n');
+  if (needsPlayer) {
+    client ??= await getClient('WEB');
+    rawUrl = typeof format.decipher === 'function'
+      ? await format.decipher(client.session.player)
+      : await client.session.player.decipher(format.url, format.signature_cipher, format.cipher);
+  }
+  const value = new URL(rawUrl);
   if (value.protocol !== 'https:' || !value.hostname.endsWith('.googlevideo.com')) {
     throw new Error('O YouTube devolveu um stream inválido.');
   }
@@ -469,11 +459,14 @@ async function cancelOffscreenSabrTask(taskId) {
   } catch { /* the job may already be finished */ }
 }
 
-async function startDownload(videoId, videoTitle, height, mode, tabId) {
-  if (mode === 'sabr') {
+async function startDownload(videoId, videoTitle, height, mode, tabId, playerData) {
+  const localInfo = normalizePlayerSnapshot(playerData, videoId)?.info;
+  const localDirectPlan = localInfo && getQualityPlan(localInfo, height);
+  const localSabrPlan = localInfo && getSabrQualityPlan(localInfo, height);
+  if (mode === 'sabr' || !localDirectPlan && localSabrPlan) {
     const session = await getSabrSession(tabId, videoId);
     if (!session) throw new Error('A sessão do player expirou. Reproduz o vídeo e volta a tentar.');
-    const { info } = await getSabrVideoInfo(videoId);
+    const info = localSabrPlan ? localInfo : (await getSabrVideoInfo(videoId)).info;
     const plan = getSabrQualityPlan(info, height);
     if (!plan) throw new Error('Esta resolução não está disponível num formato SABR compatível.');
 
@@ -513,7 +506,9 @@ async function startDownload(videoId, videoTitle, height, mode, tabId) {
     return { opened: true };
   }
 
-  const { info, client } = await getVideoInfo(videoId);
+  const { info, client } = localDirectPlan
+    ? { info: localInfo, client: null }
+    : await getVideoInfo(videoId);
   const plan = getQualityPlan(info, height);
   if (!plan) throw new Error('Esta resolução não está disponível num formato compatível.');
 
@@ -561,7 +556,7 @@ async function startDownload(videoId, videoTitle, height, mode, tabId) {
 function messageError(error) {
   const message = error instanceof Error ? error.message : '';
   if (/failed to fetch|networkerror|load failed/i.test(message)) {
-    return 'Falhou a ligação ao YouTube ao procurar as resoluções. Recarrega a yDownloader em chrome://extensions, atualiza a página do vídeo e tenta novamente.';
+    return 'Falhou a ligação ao YouTube ao preparar a transferência. Inicia a reprodução e tenta novamente.';
   }
   if (/login|required|private|unavailable|unplayable|not available/i.test(message)) {
     return 'Este vídeo não está disponível para extração. Verifica se é público e tenta novamente.';
@@ -641,14 +636,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.videoId !== currentId) return;
 
   if (message.type === 'get-resolutions') {
-    getResolutionsForTab(currentId, sender.tab?.id)
-      .then(resolutions => sendResponse({ resolutions }))
+    getResolutionsForTab(currentId, message.playerData)
+      .then(resolutions => sendResponse({ resolutions, source: 'player' }))
       .catch(error => sendResponse({ error: messageError(error) }));
     return true;
   }
 
   if (message.type === 'download' && Number.isInteger(message.resolution) && message.resolution > 0) {
-    startDownload(currentId, message.videoTitle, message.resolution, message.mode, sender.tab?.id)
+    startDownload(currentId, message.videoTitle, message.resolution, message.mode, sender.tab?.id, message.playerData)
       .then(sendResponse)
       .catch(error => sendResponse({ error: messageError(error) }));
     return true;
