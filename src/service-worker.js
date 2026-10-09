@@ -106,7 +106,11 @@ function extractVideoId(rawUrl) {
 
 function getClient(clientType) {
   if (!clients.has(clientType)) {
-    clients.set(clientType, Innertube.create({ client_type: clientType, lang: 'pt', location: 'PT' }));
+    const pending = Innertube.create({ client_type: clientType, lang: 'pt', location: 'PT' });
+    clients.set(clientType, pending);
+    pending.catch(() => {
+      if (clients.get(clientType) === pending) clients.delete(clientType);
+    });
   }
   return clients.get(clientType);
 }
@@ -227,7 +231,12 @@ async function getResolutionsForTab(videoId, tabId) {
     directError = error;
   }
 
-  const session = await getSabrSession(tabId, videoId);
+  let session = null;
+  try {
+    session = await getSabrSession(tabId, videoId);
+  } catch {
+    // SABR is an optional route; storage/session issues must not hide direct formats.
+  }
   if (!session) {
     if (resolutions.length) return resolutions;
     throw directError ?? new Error('Reproduz o vídeo neste separador para ativar a transferência SABR.');
@@ -551,6 +560,9 @@ async function startDownload(videoId, videoTitle, height, mode, tabId) {
 
 function messageError(error) {
   const message = error instanceof Error ? error.message : '';
+  if (/failed to fetch|networkerror|load failed/i.test(message)) {
+    return 'Falhou a ligação ao YouTube ao procurar as resoluções. Recarrega a yDownloader em chrome://extensions, atualiza a página do vídeo e tenta novamente.';
+  }
   if (/login|required|private|unavailable|unplayable|not available/i.test(message)) {
     return 'Este vídeo não está disponível para extração. Verifica se é público e tenta novamente.';
   }
