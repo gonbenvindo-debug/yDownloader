@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "yDownloader",
+  "version": "1.0.0",
+  "description": "Escolhe a resolução e descarrega o vídeo do YouTube.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "yDownloader",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "permissions": ["downloads"],
+  "host_permissions": ["http://127.0.0.1/*"],
+  "background": { "service_worker": "service-worker.js" },
+  "content_scripts": [{
+    "matches": ["https://www.youtube.com/*", "https://m.youtube.com/*"],
+    "js": ["content.js"],
+    "css": ["content.css"],
+    "run_at": "document_idle"
+  }]
+}

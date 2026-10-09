@@ -1,0 +1,54 @@
+#yt-downloader-button svg { fill: currentColor; }
+#yt-downloader-button.yt-downloader-loading { cursor: wait; }
+#yt-downloader-button.yt-downloader-loading svg { animation: yt-downloader-spin .8s linear infinite; }
+
+@keyframes yt-downloader-spin {
+  to { transform: rotate(360deg); }
+}
+
+#yt-downloader-popup {
+  right: 12px;
+  bottom: 62px;
+  width: 260px;
+  max-height: min(50vh, 360px);
+  z-index: 10000;
+}
+
+#yt-downloader-popup .ytp-panel-menu {
+  padding: 4px 0;
+}
+
+#yt-downloader-popup .ytp-menuitem {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 40px;
+  padding: 0 16px;
+  border: 0;
+  background: transparent;
+  color: #eee;
+  font: 14px Roboto, Arial, sans-serif;
+  text-align: left;
+}
+
+#yt-downloader-popup button.ytp-menuitem {
+  cursor: pointer;
+}
+
+#yt-downloader-popup button.ytp-menuitem:hover:not(:disabled),
+#yt-downloader-popup button.ytp-menuitem:focus-visible {
+  background: rgba(255, 255, 255, .12);
+  outline: 0;
+}
+
+#yt-downloader-popup button.ytp-menuitem:disabled {
+  color: #aaa;
+}
+
+#yt-downloader-status {
+  padding: 10px 16px;
+  color: #aaa;
+  font: 12px Roboto, Arial, sans-serif;
+  overflow-wrap: anywhere;
+}
