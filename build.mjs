@@ -11,7 +11,7 @@ const common = {
   minify: true,
   legalComments: 'none',
   platform: 'browser',
-  target: 'chrome109',
+  target: 'chrome116',
 };
 
 await Promise.all([
@@ -27,11 +27,18 @@ await Promise.all([
     outfile: join(extension, 'download.js'),
     format: 'iife',
   }),
+  build({
+    ...common,
+    entryPoints: [join(root, 'src', 'sabr-offscreen.js')],
+    outfile: join(extension, 'sabr-offscreen.js'),
+    format: 'iife',
+  }),
   copyFile(
     join(root, 'node_modules', '@jitl', 'quickjs-wasmfile-release-sync', 'dist', 'emscripten-module.wasm'),
     join(extension, 'emscripten-module.wasm'),
   ),
   copyFile(join(root, 'node_modules', 'youtubei.js', 'LICENSE'), join(licenses, 'youtubei.js-MIT.txt')),
+  copyFile(join(root, 'node_modules', 'googlevideo', 'LICENSE'), join(licenses, 'googlevideo-MIT.txt')),
   copyFile(join(root, 'node_modules', 'mediabunny', 'LICENSE'), join(licenses, 'mediabunny-MPL-2.0.txt')),
   copyFile(join(root, 'node_modules', 'quickjs-emscripten-core', 'LICENSE'), join(licenses, 'quickjs-emscripten-core-MIT.txt')),
   copyFile(join(root, 'node_modules', '@jitl', 'quickjs-wasmfile-release-sync', 'LICENSE'), join(licenses, 'quickjs-wasmfile-release-sync-MIT.txt')),

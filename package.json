@@ -1,6 +1,6 @@
 {
   "name": "ydownloader",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
   "scripts": {
     "build": "node build.mjs"
@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@jitl/quickjs-wasmfile-release-sync": "0.32.0",
+    "googlevideo": "4.0.4",
     "mediabunny": "1.61.3",
     "quickjs-emscripten-core": "0.32.0",
     "youtubei.js": "18.1.0"

@@ -12,9 +12,11 @@ Não é necessário instalar Node.js para usar a extensão já compilada incluí
 
 ## Como funciona
 
+- A arquitetura SABR foi estudada a partir de [avi12/youtube-downloader](https://github.com/avi12/youtube-downloader), que documenta captura da sessão do player e processamento offscreen no Chrome. Aqui a implementação é menor: mantém o percurso direto existente e usa `googlevideo` para uma alternativa SABR local, sem copiar o código desse projeto.
 - A extensão obtém os formatos e os links dos streams diretamente do YouTube com `youtubei.js`, usando clientes alternativos do YouTube quando necessário.
+- Quando o YouTube não expõe URLs diretas, a extensão pode reutilizar a sessão SABR criada pelo player ativo. `googlevideo` lê o protocolo e transfere os segmentos numa página offscreen do Chrome; os ficheiros temporários ficam no armazenamento privado do browser.
 - Formatos que já incluem áudio e vídeo são guardados pelo gestor de downloads do browser.
-- Quando o YouTube fornece áudio e vídeo separados, a extensão abre uma página local. Ao escolher o ficheiro de destino, o Mediabunny une os streams e grava o resultado diretamente no disco, sem manter o vídeo inteiro em memória.
+- Quando o YouTube fornece áudio e vídeo separados, a extensão abre uma página local. Ao escolher o ficheiro de destino, o Mediabunny une os streams e grava o resultado diretamente no disco, sem manter o vídeo inteiro em memória. A mesma união é usada para segmentos SABR.
 - O QuickJS/WebAssembly executa o pequeno código de assinatura do player dentro de um interpretador isolado. O código dinâmico não é executado no contexto da extensão.
 
 ## Compilar a extensão
@@ -33,4 +35,5 @@ Depois, carrega novamente a pasta `extension` em `chrome://extensions` ou `brave
 - O browser tem de conseguir ler os codecs e o formato apresentados pelo YouTube. A extensão oculta formatos DRM ou que não consiga unir.
 - Vídeos privados, indisponíveis ou que exijam autenticação podem não fornecer streams à extensão.
 - O YouTube nem sempre fornece links de mídia para todas as resoluções. A extensão só mostra formatos com streams utilizáveis; em alguns vídeos, isso pode limitar a qualidade máxima disponível.
+- A opção SABR depende de o player ativo ter criado uma sessão válida no separador atual; inicia a reprodução antes de abrir o menu de download.
 - O browser pede confirmação do ficheiro de destino nos formatos que precisam de unir áudio e vídeo.

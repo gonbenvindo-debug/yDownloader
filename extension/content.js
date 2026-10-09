@@ -121,7 +121,9 @@ function addResolution(resolution) {
   option.className = 'ytp-menuitem';
   option.type = 'button';
   option.setAttribute('role', 'menuitem');
-  const modeLabel = resolution.mode === 'merge' ? ' · juntar no browser' : '';
+  const modeLabel = resolution.mode === 'sabr'
+    ? ' · SABR, juntar localmente'
+    : resolution.mode === 'merge' ? ' · juntar no browser' : '';
   option.textContent = `${resolution.height}p (${resolution.extension.toUpperCase()}${modeLabel})`;
   option.addEventListener('click', async () => {
     if (option.disabled || downloading) return;
@@ -131,7 +133,11 @@ function addResolution(resolution) {
     closePopup();
     setDownloading(true);
     let result;
-    try { result = await chrome.runtime.sendMessage({ type: 'download', videoId, videoTitle, resolution: resolution.height }); }
+    try {
+      result = await chrome.runtime.sendMessage({
+        type: 'download', videoId, videoTitle, resolution: resolution.height, mode: resolution.mode,
+      });
+    }
     catch { result = { error: 'Não foi possível iniciar o download.' }; }
     if (result?.opened) {
       setDownloading(false);

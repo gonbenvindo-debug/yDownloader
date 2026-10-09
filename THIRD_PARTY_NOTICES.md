@@ -3,6 +3,7 @@
 The extension bundles the following libraries. Their license texts are copied into `extension/third-party-licenses/` when the extension is built.
 
 - [YouTube.js](https://github.com/LuanRT/YouTube.js) 18.1.0 — MIT
+- [GoogleVideo](https://github.com/LuanRT/GoogleVideo) 4.0.4 — MIT (SABR/UMP stream parsing)
 - [@bufbuild/protobuf](https://github.com/bufbuild/protobuf-es) 2.16.0 — Apache-2.0 AND BSD-3-Clause
 - [fflate](https://github.com/101arrowz/fflate) 0.8.3 — MIT
 - [Meriyah](https://github.com/meriyah/meriyah) 7.4.0 — ISC

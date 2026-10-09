@@ -1,5 +1,6 @@
 import {
   ALL_FORMATS,
+  BlobSource,
   EncodedAudioPacketSource,
   EncodedPacketSink,
   EncodedVideoPacketSource,
@@ -20,6 +21,8 @@ let task;
 let activeInputs = [];
 let activeWritable;
 let cancelled = false;
+let sabrPollTimer;
+let sabrReady = false;
 
 function setStatus(message) {
   status.textContent = message;
@@ -38,6 +41,19 @@ function createInput(url) {
     source: new UrlSource(ensureMediaUrl(url), { requestInit: { credentials: 'omit' } }),
     formats: ALL_FORMATS,
   });
+}
+
+async function createSabrInput(taskId, track) {
+  const directory = await navigator.storage.getDirectory();
+  const fileHandle = await directory.getFileHandle(`${taskId}-${track}.media`);
+  return new Input({ source: new BlobSource(await fileHandle.getFile()), formats: ALL_FORMATS });
+}
+
+async function removeSabrFiles(id) {
+  if (task?.mode !== 'sabr') return;
+  const directory = await navigator.storage.getDirectory();
+  await Promise.all(['video', 'audio'].map(track =>
+    directory.removeEntry(`${id}-${track}.media`).catch(() => {})));
 }
 
 function formatBytes(value) {
@@ -79,12 +95,13 @@ async function downloadMergedVideo() {
   saveButton.disabled = true;
   cancelButton.hidden = false;
   cancelled = false;
-  setStatus('A abrir os streams do YouTube…');
+  setStatus(task.mode === 'sabr' ? 'A preparar os segmentos guardados localmente…' : 'A abrir os streams do YouTube…');
 
   const writable = await fileHandle.createWritable();
   activeWritable = writable;
-  const videoInput = createInput(task.videoUrl);
-  const audioInput = createInput(task.audioUrl);
+  const [videoInput, audioInput] = task.mode === 'sabr'
+    ? await Promise.all([createSabrInput(task.taskId, 'video'), createSabrInput(task.taskId, 'audio')])
+    : [createInput(task.videoUrl), createInput(task.audioUrl)];
   activeInputs = [videoInput, audioInput];
 
   try {
@@ -134,6 +151,7 @@ async function downloadMergedVideo() {
     await output.finalize();
     setStatus(`Concluído. Ficheiro guardado (${formatBytes(writtenBytes)}).`);
     saveButton.hidden = true;
+    await removeSabrFiles(task.taskId);
   } catch (error) {
     await writable.abort(error).catch(() => {});
     throw error;
@@ -160,9 +178,18 @@ saveButton.addEventListener('click', async () => {
 });
 
 cancelButton.addEventListener('click', async () => {
+  if (task?.mode === 'sabr' && !sabrReady && !activeWritable) {
+    cancelButton.disabled = true;
+    setStatus('A cancelar a transferência dos segmentos…');
+    await chrome.runtime.sendMessage({ type: 'cancel-sabr-task', taskId: task.taskId }).catch(() => {});
+    await pollSabrState();
+    cancelButton.disabled = false;
+    return;
+  }
   cancelled = true;
   activeInputs.forEach(input => input.dispose());
   await activeWritable?.abort(new DOMException('Download cancelado.', 'AbortError')).catch(() => {});
+  if (task?.mode === 'sabr') await removeSabrFiles(task.taskId);
   setStatus('A cancelar o download…');
 });
 
@@ -176,10 +203,44 @@ async function loadTask() {
     if (!response?.task) throw new Error(response?.error || 'Não foi possível carregar o pedido de download.');
     task = response.task;
     title.textContent = `${task.title} · ${task.resolution}p`;
-    setStatus('Pronto para transferir e unir os streams neste browser.');
-    saveButton.disabled = false;
+    if (task.mode === 'sabr') {
+      saveButton.textContent = 'Escolher ficheiro e unir localmente';
+      cancelButton.hidden = false;
+      setStatus('A transferir segmentos da sessão do player…');
+      await pollSabrState();
+      sabrPollTimer = setInterval(() => void pollSabrState(), 1000);
+    } else {
+      setStatus('Pronto para transferir e unir os streams neste browser.');
+      saveButton.disabled = false;
+    }
   } catch (error) {
     setStatus(error instanceof Error ? error.message : 'Não foi possível carregar o pedido de download.');
+  }
+}
+
+async function pollSabrState() {
+  if (task?.mode !== 'sabr') return;
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'sabr-task-state', taskId: task.taskId });
+    const state = response?.state;
+    if (!state) return;
+    if (Number.isFinite(state.bytes)) setStatus(`A transferir e guardar segmentos localmente… ${formatBytes(state.bytes)}.`);
+    if (state.status === 'complete') {
+      sabrReady = true;
+      clearInterval(sabrPollTimer);
+      cancelButton.hidden = true;
+      saveButton.disabled = false;
+      setStatus(`Segmentos prontos (${formatBytes(state.bytes ?? 0)}). Escolhe onde guardar o vídeo unido.`);
+    } else if (state.status === 'failed' || state.status === 'cancelled') {
+      clearInterval(sabrPollTimer);
+      cancelButton.hidden = true;
+      saveButton.disabled = true;
+      setStatus(state.status === 'cancelled' ? 'Transferência cancelada.' : state.error || 'Falha ao transferir segmentos SABR.');
+    } else {
+      saveButton.disabled = true;
+    }
+  } catch {
+    setStatus('A aguardar pelo processo local de transferência…');
   }
 }
 
