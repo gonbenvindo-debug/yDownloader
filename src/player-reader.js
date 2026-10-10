@@ -61,7 +61,7 @@ export function createPlayerReader({
     if (hasQualities(snapshot, videoId)) return snapshot;
     if (failure?.name === 'AbortError') throw new Error('O YouTube demorou a fornecer os formatos. Tenta novamente.');
     if (/failed to fetch|networkerror/i.test(failure?.message ?? '')) {
-      throw new Error('Não foi possível ler a página do vídeo no YouTube. Atualiza a página e tenta novamente.');
+      throw new Error('Não foi possível ler os formatos agora. Tenta abrir o menu novamente daqui a pouco.');
     }
     throw failure ?? new Error('O player ainda não forneceu as resoluções deste vídeo.');
   }

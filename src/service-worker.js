@@ -31,6 +31,7 @@ function youtubeVideoIdFromTab(tab) {
 
 async function captureSabrPlayerSession(details) {
   if (!Number.isInteger(details.tabId) || details.tabId < 0) return;
+  const requestStartedAt = Date.now();
   try {
     const initiator = new URL(details.initiator ?? details.documentUrl ?? details.originUrl ?? '');
     if (initiator.hostname !== 'youtube.com' && !initiator.hostname.endsWith('.youtube.com')) return;
@@ -52,9 +53,11 @@ async function captureSabrPlayerSession(details) {
     const ustreamerConfig = request.videoPlaybackUstreamerConfig;
     if (!poToken || poToken.byteLength < 32 || !ustreamerConfig?.byteLength) return;
 
+    const requestVideoId = [details.documentUrl, details.initiator, details.originUrl]
+      .map(value => value ? extractVideoId(value) : null).find(Boolean);
     const tab = await chrome.tabs.get(details.tabId).catch(() => null);
     const videoId = youtubeVideoIdFromTab(tab);
-    if (!videoId) return;
+    if (!videoId || requestVideoId && requestVideoId !== videoId) return;
 
     const serverAbrStreamingUrl = new URL(details.url);
     if (serverAbrStreamingUrl.protocol !== 'https:' || !serverAbrStreamingUrl.hostname.endsWith('.googlevideo.com')) return;
@@ -66,9 +69,14 @@ async function captureSabrPlayerSession(details) {
       videoPlaybackUstreamerConfig: bytesToBase64(ustreamerConfig),
       poToken: bytesToBase64(poToken),
       clientInfo: JSON.parse(JSON.stringify(client)),
-      capturedAt: Date.now(),
+      capturedAt: requestStartedAt,
     };
-    await chrome.storage.session.set({ [`${sabrSessionPrefix}${details.tabId}`]: session });
+    const key = `${sabrSessionPrefix}${details.tabId}`;
+    const currentTab = await chrome.tabs.get(details.tabId).catch(() => null);
+    if (youtubeVideoIdFromTab(currentTab) !== videoId) return;
+    const stored = await chrome.storage.session.get(key);
+    if ((stored[key]?.capturedAt ?? 0) > requestStartedAt) return;
+    await chrome.storage.session.set({ [key]: session });
   } catch {
     // Ignore unrelated or incomplete SABR requests while YouTube playback continues.
   }
@@ -159,8 +167,31 @@ async function getSabrSession(tabId, videoId) {
   const key = `${sabrSessionPrefix}${tabId}`;
   const stored = await chrome.storage.session.get(key);
   const session = stored[key];
-  if (!session || session.videoId !== videoId || Date.now() - session.capturedAt > 60 * 60 * 1000) return null;
+  if (!session || session.videoId !== videoId || !Number.isFinite(session.capturedAt)
+    || Date.now() - session.capturedAt > 60 * 60 * 1000) return null;
+  try {
+    const endpoint = new URL(session.serverAbrStreamingUrl);
+    if (endpoint.protocol !== 'https:' || !endpoint.hostname.endsWith('.googlevideo.com')) return null;
+    const rawExpiry = Number(endpoint.searchParams.get('expire'));
+    if (Number.isFinite(rawExpiry) && rawExpiry > 0) {
+      const expiresAt = rawExpiry > 1e12 ? rawExpiry : rawExpiry * 1000;
+      if (expiresAt <= Date.now() + 15_000) return null;
+    }
+  } catch {
+    return null;
+  }
   return session;
+}
+
+async function waitForSabrSession(tabId, videoId, timeoutMs = 3000) {
+  if (!Number.isInteger(tabId) || tabId < 0) return null;
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const session = await getSabrSession(tabId, videoId);
+    if (session) return session;
+    if (Date.now() >= deadline) return null;
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
 }
 
 function toSabrFormat(format) {
@@ -224,7 +255,7 @@ function getSabrQualityPlan(info, height) {
 
 async function getResolutionsForTab(videoId, playerData) {
   const snapshot = normalizePlayerSnapshot(playerData, videoId);
-  if (!snapshot) throw new Error('Não foi possível ler este vídeo no player. Atualiza a página e tenta novamente.');
+  if (!snapshot) throw new Error('O player ainda está a sincronizar este vídeo. Aguarda um instante e tenta abrir o menu novamente.');
   const { info, nativeHeights, videoHeights } = snapshot;
   const heights = new Set([...nativeHeights, ...videoHeights]
     .filter(height => Number.isInteger(height) && height >= 72 && height <= 8640));
@@ -477,58 +508,65 @@ async function startDownload(videoId, videoTitle, height, mode, tabId, playerDat
   const localInfo = normalizePlayerSnapshot(playerData, videoId)?.info;
   const localDirectPlan = localInfo && getQualityPlan(localInfo, height);
   const localSabrPlan = localInfo && getSabrQualityPlan(localInfo, height);
-  const session = localSabrPlan || mode === 'sabr' ? await getSabrSession(tabId, videoId) : null;
+  let session = localSabrPlan || mode === 'sabr' ? await getSabrSession(tabId, videoId) : null;
   const requiresDecipher = localDirectPlan && [localDirectPlan.format, localDirectPlan.video, localDirectPlan.audio]
     .filter(Boolean).some(format => format.signature_cipher || format.cipher
       || format.url && new URL(format.url).searchParams.has('n'));
+  const wantsSabr = Boolean(localSabrPlan && (!localDirectPlan || requiresDecipher)
+    || mode === 'sabr' && !localDirectPlan);
+  if (wantsSabr && !session) session = await waitForSabrSession(tabId, videoId);
   // A signed progressive URL may require a failing API request. The active SABR
   // session already has the authorization needed for the same resolution.
-  if (localSabrPlan && (!localDirectPlan || mode === 'sabr' || requiresDecipher && session)
+  if (localSabrPlan && (!localDirectPlan || requiresDecipher && session)
     || mode === 'sabr' && !localDirectPlan) {
-    if (!session) throw new Error('A sessão do player expirou. Reproduz o vídeo e volta a tentar.');
-    const info = localSabrPlan ? localInfo : (await getSabrVideoInfo(videoId)).info;
-    const plan = getSabrQualityPlan(info, height);
-    if (!plan) throw new Error('Esta resolução não está disponível num formato SABR compatível.');
-
-    const filename = safeFilename(videoTitle, videoId);
-    const taskId = crypto.randomUUID();
-    const suggestedFilename = `${filename}.${plan.extension}`;
-    const sabr = {
-      serverAbrStreamingUrl: session.serverAbrStreamingUrl,
-      videoPlaybackUstreamerConfig: session.videoPlaybackUstreamerConfig,
-      poToken: session.poToken,
-      clientInfo: session.clientInfo,
-      durationMs: plan.durationMs,
-      videoFormat: plan.videoFormat,
-      audioFormat: plan.audioFormat,
-    };
-    const pendingKey = `pending:${taskId}`;
-    await chrome.storage.session.set({
-      [pendingKey]: {
-        taskId,
-        tabId,
-        mode: 'sabr',
-        videoId,
-        title: info.basic_info.title || filename,
-        resolution: height,
-        width: plan.videoFormat.width,
-        height: plan.videoFormat.height,
-        durationSeconds: plan.durationMs / 1000,
-        createdAt: Date.now(),
-        extension: plan.extension,
-        suggestedFilename,
-      },
-    });
-
-    try {
-      const { [pendingKey]: pending } = await chrome.storage.session.get(pendingKey);
-      await startOffscreenSabrTask(taskId, { sabr, task: pending });
-    } catch (error) {
-      await cancelOffscreenSabrTask(taskId);
-      await chrome.storage.session.remove(pendingKey);
-      throw error;
+    if (!session && !localDirectPlan) {
+      throw new Error('O YouTube ainda não criou uma sessão de transferência. Deixa o vídeo reproduzir alguns segundos e tenta novamente.');
     }
-    return { taskId };
+    if (session) {
+      const info = localSabrPlan ? localInfo : (await getSabrVideoInfo(videoId)).info;
+      const plan = getSabrQualityPlan(info, height);
+      if (!plan) throw new Error('Esta resolução não está disponível num formato SABR compatível.');
+
+      const filename = safeFilename(videoTitle, videoId);
+      const taskId = crypto.randomUUID();
+      const suggestedFilename = `${filename}.${plan.extension}`;
+      const sabr = {
+        serverAbrStreamingUrl: session.serverAbrStreamingUrl,
+        videoPlaybackUstreamerConfig: session.videoPlaybackUstreamerConfig,
+        poToken: session.poToken,
+        clientInfo: session.clientInfo,
+        durationMs: plan.durationMs,
+        videoFormat: plan.videoFormat,
+        audioFormat: plan.audioFormat,
+      };
+      const pendingKey = `pending:${taskId}`;
+      await chrome.storage.session.set({
+        [pendingKey]: {
+          taskId,
+          tabId,
+          mode: 'sabr',
+          videoId,
+          title: info.basic_info.title || filename,
+          resolution: height,
+          width: plan.videoFormat.width,
+          height: plan.videoFormat.height,
+          durationSeconds: plan.durationMs / 1000,
+          createdAt: Date.now(),
+          extension: plan.extension,
+          suggestedFilename,
+        },
+      });
+
+      try {
+        const { [pendingKey]: pending } = await chrome.storage.session.get(pendingKey);
+        await startOffscreenSabrTask(taskId, { sabr, task: pending });
+      } catch (error) {
+        await cancelOffscreenSabrTask(taskId);
+        await chrome.storage.session.remove(pendingKey);
+        throw error;
+      }
+      return { taskId };
+    }
   }
 
   const { info, client } = localDirectPlan

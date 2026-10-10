@@ -14,6 +14,7 @@ let downloading = false;
 let activeDownloadId = null;
 let activeTaskId = null;
 let menuPlayerData = null;
+let menuRequestGeneration = 0;
 const readPlayerData = createPlayerReader();
 
 function getVideoId() {
@@ -23,6 +24,7 @@ function getVideoId() {
 
 function closePopup() {
   if (!popup) return;
+  menuRequestGeneration++;
   popup.style.display = 'none';
   button?.setAttribute('aria-expanded', 'false');
 }
@@ -180,8 +182,7 @@ function addResolution(resolution) {
   option.className = 'ytp-menuitem';
   option.type = 'button';
   option.setAttribute('role', 'menuitem');
-  const containerLabel = resolution.extension ? ` (${resolution.extension.toUpperCase()})` : '';
-  option.textContent = `${resolution.height}p${containerLabel}`;
+  option.textContent = `${resolution.height}p`;
   option.addEventListener('click', async () => {
     if (option.disabled || downloading) return;
     const videoId = currentVideoId;
@@ -228,24 +229,26 @@ async function togglePopup() {
   popup.style.display = 'block';
   button.setAttribute('aria-expanded', 'true');
   menu.replaceChildren();
+  const requestGeneration = ++menuRequestGeneration;
   const videoId = currentVideoId;
   setStatus('A ler as resoluções do vídeo…');
   let result;
   try {
     const playerData = await readPlayerData(videoId);
     if (videoId !== getVideoId()) return;
-    if (!playerData) throw new Error('O player ainda não forneceu as resoluções. Inicia a reprodução e volta a abrir este menu.');
+    if (!playerData) throw new Error('O player ainda está a carregar. Deixa o vídeo reproduzir alguns segundos e tenta novamente.');
     menuPlayerData = playerData;
     result = await chrome.runtime.sendMessage({ type: 'get-resolutions', videoId, playerData });
   } catch (error) { result = { error: error.message || 'Não foi possível ler as resoluções do player.' }; }
-  if (videoId !== getVideoId() || videoId !== currentVideoId || popup.style.display !== 'block') return;
+  if (requestGeneration !== menuRequestGeneration || videoId !== getVideoId()
+    || videoId !== currentVideoId || popup.style.display !== 'block') return;
   if (result?.error) {
     setStatus(result.error);
     return;
   }
   const resolutions = Array.isArray(result?.resolutions) ? result.resolutions : [];
   if (!resolutions.length) {
-    setStatus('O YouTube não forneceu resoluções de vídeo. Atualiza a página e tenta novamente.');
+    setStatus('O player ainda está a carregar as resoluções. Deixa o vídeo reproduzir alguns segundos e abre o menu novamente.');
     return;
   }
   setStatus('');

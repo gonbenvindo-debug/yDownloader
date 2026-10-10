@@ -15,7 +15,7 @@ export function requestPlayerSnapshot(videoId, pageWindow = window, timeoutMs = 
       const snapshot = event.data.playerData;
       finish(null, snapshot?.videoId === videoId ? snapshot : null);
     };
-    const timeout = setTimeout(() => finish(new Error('Não foi possível ler o player. Recarrega a extensão e atualiza a página do vídeo.')), timeoutMs);
+    const timeout = setTimeout(() => finish(new Error('O player demorou a responder.')), timeoutMs);
     pageWindow.addEventListener('message', onMessage);
     pageWindow.postMessage({ type: PLAYER_REQUEST, requestId, videoId }, pageWindow.location.origin);
   });

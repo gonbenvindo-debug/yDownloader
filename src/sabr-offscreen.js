@@ -181,7 +181,7 @@ async function failJob(job, error) {
   const detail = error instanceof Error ? error.message : 'Falha ao preparar o ficheiro.';
   await reportState(job.taskId, 'failed', {
     error: /attestation required/i.test(detail)
-      ? 'O YouTube recusou a sessão de reprodução. Atualiza o vídeo e volta a tentar.'
+      ? 'O YouTube recusou a sessão atual. Deixa o vídeo reproduzir alguns segundos e tenta novamente.'
       : error?.name === 'QuotaExceededError'
         ? 'O browser ficou sem espaço para os ficheiros temporários. Liberta espaço e tenta novamente.'
         : detail,

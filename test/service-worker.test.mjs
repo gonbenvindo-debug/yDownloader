@@ -54,7 +54,7 @@ beforeEach(() => {
 
 function message(payload, from = sender) {
   return new Promise((resolve,reject) => {
-    const timeout=setTimeout(()=>reject(new Error('No response from the service worker')),2000);
+    const timeout=setTimeout(()=>reject(new Error('No response from the service worker')),7000);
     const keepAlive=events.message({videoId,...payload},from,result=>{clearTimeout(timeout);resolve(result);});
     if (keepAlive!==true) { clearTimeout(timeout); reject(new Error('Message was not accepted')); }
   });
@@ -106,7 +106,7 @@ test('a protected format does not suppress an unprotected format at the same hei
 
 test('stale metadata cannot return resolutions for another video', async () => {
   const result=await message({type:'get-resolutions',playerData:{...sabrSnapshot(),videoId:'dQw4w9WgXcQ'}});
-  assert.match(result.error,/ler este vídeo/);
+  assert.match(result.error,/sincronizar este vídeo/);
   assert.equal(fetchCalls,0);
 });
 
@@ -152,6 +152,31 @@ test('SABR transfer preparation reuses page metadata and the captured playback s
   assert.equal(opened,undefined);
   assert.equal(stored[`pending:${result.taskId}`].tabId,42);
   assert.equal(fetchCalls,0);
+});
+
+test('SABR waits briefly for the player session when playback starts at the same time', async () => {
+  setTimeout(() => {
+    stored['sabr-session:42']={videoId,capturedAt:Date.now(),serverAbrStreamingUrl:'https://r1.test.googlevideo.com/videoplayback?sabr=1',poToken:'test-token',videoPlaybackUstreamerConfig:'test-config',clientInfo:{clientName:1}};
+  }, 50);
+  const result=await message({type:'download',resolution:240,mode:'sabr',playerData:sabrSnapshot()});
+  assert.equal(typeof result.taskId,'string');
+  assert.equal(sabrJob.type,'start-sabr-download');
+});
+
+test('a fresh progressive stream is used when the menu SABR session is not ready', async () => {
+  const snapshot=sabrSnapshot();
+  snapshot.streamingData.formats=[{
+    itag:18,height:240,qualityLabel:'240p',mimeType:'video/mp4; codecs="avc1.42001E, mp4a.40.2"',
+    url:'https://r1.test.googlevideo.com/videoplayback?itag=18',
+  }];
+  stored['sabr-session:42']={
+    videoId,capturedAt:Date.now(),
+    serverAbrStreamingUrl:`https://r1.test.googlevideo.com/videoplayback?expire=${Math.floor(Date.now()/1000)-1}`,
+    poToken:'expired-token',videoPlaybackUstreamerConfig:'expired-config',clientInfo:{clientName:1},
+  };
+  const result=await message({type:'download',resolution:240,mode:'sabr',playerData:snapshot});
+  assert.equal(result.downloadId,123);
+  assert.equal(downloaded.url,snapshot.streamingData.formats[0].url);
 });
 
 test('separate audio and video are processed offscreen without opening a tab', async () => {
@@ -204,6 +229,6 @@ test('a ciphered progressive format can reuse SABR instead of the failing extrac
 
 test('SABR without a playback session asks for playback and does not retry the failing API', async () => {
   const result=await message({type:'download',resolution:240,mode:'sabr',playerData:sabrSnapshot()});
-  assert.match(result.error,/Reproduz o vídeo/);
+  assert.match(result.error,/Deixa o vídeo reproduzir/);
   assert.equal(fetchCalls,0);
 });

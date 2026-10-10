@@ -63,6 +63,7 @@ try {
   const option = page.getByRole('menuitem', { name: new RegExp(`^${resolution}p`) });
   await option.waitFor();
   const menu = await page.locator('#yt-downloader-popup').innerText();
+  assert.doesNotMatch(menu, /\((?:MP4|WEBM)\)/i, 'Resolution names should show the resolution only.');
   await option.click();
 
   assert.match(page.url(), /youtube\.com\/watch\?/);

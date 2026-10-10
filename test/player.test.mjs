@@ -100,15 +100,17 @@ test('video heights survive missing audio, codecs and numeric string itags', () 
   assert.equal(data.info.streaming_data.adaptive_formats[0].itag, 137);
 });
 
-test('a failed MAIN bridge falls back to script text without a network request', async () => {
+test('inline formats remain usable when the MAIN bridge fails without a network request', async () => {
+  let bridgeCalls=0;
   const read = createPlayerReader({
     pageWindow:{location:{origin:'https://www.youtube.com'}},
     pageDocument:environment({scripts:[`var ytInitialPlayerResponse=${JSON.stringify(response(videoId))};`]}).document,
-    readBridge:async()=>{throw new Error('bridge timed out');},
+    readBridge:async()=>{bridgeCalls++;throw new Error('bridge timed out');},
     fetchImpl:async()=>{throw new Error('should not fetch');},
   });
   const snapshot = await read(videoId);
   assert.deepEqual(normalizePlayerSnapshot(snapshot,videoId).videoHeights,[240]);
+  assert.equal(bridgeCalls,1);
 });
 
 test('an incomplete SPA player reads the current watch HTML on the same origin', async () => {
@@ -150,7 +152,7 @@ test('concurrent menu reads share one request and do not reuse a rejected promis
   const first=read(videoId);
   const second=read(videoId);
   assert.equal(first,second);
-  await assert.rejects(first,/ler a página/);
+  await assert.rejects(first,/ler os formatos/);
   assert.equal(bridgeCalls,1);
   assert.equal(networkCalls,1);
   await assert.rejects(read(videoId));
