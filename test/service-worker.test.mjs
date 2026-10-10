@@ -16,6 +16,7 @@ globalThis.fetch = async () => { fetchCalls++; throw new TypeError('Failed to fe
 const event = name => ({addListener: listener => { events[name] = listener; }});
 globalThis.chrome = {
   runtime: {
+    id: 'test',
     getURL: path => `chrome-extension://test/${path}`,
     onMessage: event('message'),
     getContexts: async () => [],
@@ -40,10 +41,10 @@ beforeEach(() => {
   for (const key of Object.keys(stored)) delete stored[key];
 });
 
-function message(payload) {
+function message(payload, from = sender) {
   return new Promise((resolve,reject) => {
     const timeout=setTimeout(()=>reject(new Error('No response from the service worker')),2000);
-    const keepAlive=events.message({videoId,...payload},sender,result=>{clearTimeout(timeout);resolve(result);});
+    const keepAlive=events.message({videoId,...payload},from,result=>{clearTimeout(timeout);resolve(result);});
     if (keepAlive!==true) { clearTimeout(timeout); reject(new Error('Message was not accepted')); }
   });
 }
@@ -115,7 +116,35 @@ test('direct playback URLs reuse the page formats without a new player request',
   const result=await message({type:'download',resolution:360,mode:'direct',playerData});
   assert.equal(result.downloadId,123);
   assert.equal(downloaded.url,playerData.streamingData.formats[0].url);
+  assert.equal(downloaded.headers, undefined);
   assert.equal(fetchCalls,0);
+});
+
+test('download page reload preserves a task until successful saving', async () => {
+  const taskId = crypto.randomUUID();
+  const page = {url:`chrome-extension://test/download.html?task=${taskId}`};
+  stored[`pending:${taskId}`] = {taskId, title:'Retained task'};
+  for (let count=0;count<2;count++) {
+    const result = await message({type:'consume-pending-download',taskId},page);
+    assert.equal(result.task.title,'Retained task');
+  }
+  stored[`sabr-task:${taskId}`] = {status:'complete'};
+  assert.deepEqual(await message({type:'finish-download-task',taskId},page),{accepted:true});
+  assert.equal(stored[`pending:${taskId}`],undefined);
+  assert.equal(stored[`sabr-task:${taskId}`],undefined);
+});
+
+test('a similar URL cannot read extension download tasks', async () => {
+  await assert.rejects(message({type:'consume-pending-download',taskId:crypto.randomUUID()}, {url:'chrome-extension://test/download.html.attacker'}), /not accepted/);
+});
+
+test('a crashed offscreen transfer stops waiting after missing heartbeats', async () => {
+  const taskId = crypto.randomUUID();
+  stored[`sabr-task:${taskId}`] = {status:'running',bytes:10,updatedAt:Date.now()-100000};
+  const result = await message({type:'sabr-task-state',taskId}, {url:'chrome-extension://test/download.html'});
+  assert.equal(result.state.status,'failed');
+  assert.match(result.state.error,/deixou de responder/);
+  assert.equal(sabrJob.type,'cancel-sabr-download');
 });
 
 test('SABR transfer preparation reuses page metadata and the captured playback session', async () => {

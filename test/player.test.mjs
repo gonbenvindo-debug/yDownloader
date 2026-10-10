@@ -139,6 +139,24 @@ test('native resolutions remain usable when both HTML fetching and MAIN fail', a
   assert.deepEqual(normalizePlayerSnapshot(await read(videoId),videoId).nativeHeights,[1080]);
 });
 
+test('concurrent menu reads share one request and do not reuse a rejected promise', async () => {
+  let bridgeCalls=0;
+  let networkCalls=0;
+  const read=createPlayerReader({
+    pageWindow:{location:{origin:'https://www.youtube.com'}},pageDocument:environment().document,
+    readBridge:async()=>{bridgeCalls++;return null;},
+    fetchImpl:async()=>{networkCalls++;throw new TypeError('Failed to fetch');},
+  });
+  const first=read(videoId);
+  const second=read(videoId);
+  assert.equal(first,second);
+  await assert.rejects(first,/ler a página/);
+  assert.equal(bridgeCalls,1);
+  assert.equal(networkCalls,1);
+  await assert.rejects(read(videoId));
+  assert.equal(networkCalls,2);
+});
+
 test('HTML from a different video and consent redirects cannot provide download data', async () => {
   const options={
     pageWindow:{location:{origin:'https://www.youtube.com'}},pageDocument:environment().document,

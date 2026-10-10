@@ -35,7 +35,9 @@ O build também atualiza a versão descompactada na pasta fixa `../../outputs/yD
 
 ## Verificação
 
-`npm test` verifica o leitor, a ponte MAIN/isolated e o worker compilado, incluindo falhas de rede, respostas parciais, navegação entre vídeos e preparação de downloads diretos/SABR. `npm run test:youtube` lê três páginas públicas reais e compara a lista do worker com os formatos do HTML. Estes testes não substituem uma transferência completa numa extensão instalada no Chrome.
+`npm test` verifica o leitor, a ponte MAIN/isolated, a validação e cancelamento de streams, tarefas após recarregar a página e o worker compilado. `npm run test:youtube` lê três páginas públicas e compara as resoluções do worker com os formatos do YouTube. `npm run test:chrome` abre um perfil isolado do Chrome, carrega a extensão, transfere e une os streams, volta a abrir a página, guarda o ficheiro e valida resolução, duração, codecs e reprodução no início, meio e fim. A transferência 4K verificada foi [Big Buck Bunny 4K](https://www.youtube.com/watch?v=aqz-KE-bpKQ); o relatório local regista duração, codecs, pacotes e SHA-256.
+
+O teste do Chrome usa `../../outputs/test-4k` para guardar o ficheiro e o relatório. Pode receber um vídeo público e resolução alternativos através de `TEST_VIDEO_URL`, `TEST_RESOLUTION` e `TEST_OUTPUT_DIR`. O teste substitui apenas o seletor nativo de destino por um ficheiro temporário do próprio Chrome; a transferência e a união passam pela implementação real da extensão.
 
 ## Limitações
 

@@ -409,7 +409,7 @@ async function registerSabrOriginRule() {
       condition: {
         urlFilter: '||googlevideo.com/videoplayback',
         requestMethods: ['post'],
-        tabIds: [-1],
+        initiatorDomains: [chrome.runtime.id],
       },
     }],
   });
@@ -425,11 +425,11 @@ async function removeSabrOriginRuleIfIdle() {
 }
 
 async function startOffscreenSabrTask(taskId, task) {
-  await ensureSabrOffscreenDocument();
-  await registerSabrOriginRule();
   const stateKey = `${sabrTaskPrefix}${taskId}`;
-  await chrome.storage.session.set({ [stateKey]: { status: 'running', bytes: 0, startedAt: Date.now() } });
+  await chrome.storage.session.set({ [stateKey]: { status: 'running', bytes: 0, startedAt: Date.now(), updatedAt: Date.now() } });
   try {
+    await ensureSabrOffscreenDocument();
+    await registerSabrOriginRule();
     const response = await chrome.runtime.sendMessage({
       target: 'sabr-offscreen',
       type: 'start-sabr-download',
@@ -490,6 +490,10 @@ async function startDownload(videoId, videoTitle, height, mode, tabId, playerDat
         videoId,
         title: info.basic_info.title || filename,
         resolution: height,
+        width: plan.videoFormat.width,
+        height: plan.videoFormat.height,
+        durationSeconds: plan.durationMs / 1000,
+        createdAt: Date.now(),
         extension: plan.extension,
         suggestedFilename,
       },
@@ -517,7 +521,6 @@ async function startDownload(videoId, videoTitle, height, mode, tabId, playerDat
     const url = await decipher(plan.format, client);
     const downloadId = await startBrowserDownload({
       url,
-      headers: [{ name: 'Referer', value: `https://www.youtube.com/watch?v=${videoId}` }],
       filename: `${filename}.${plan.extension}`,
       saveAs: false,
       conflictAction: 'uniquify',
@@ -534,9 +537,15 @@ async function startDownload(videoId, videoTitle, height, mode, tabId, playerDat
   const suggestedFilename = `${filename}.${plan.extension}`;
   await chrome.storage.session.set({
     [key]: {
+      taskId,
+      mode: 'merge',
       videoId,
       title: info.basic_info.title || filename,
       resolution: height,
+      width: plan.video.width,
+      height: plan.video.height,
+      durationSeconds: info.basic_info.duration,
+      createdAt: Date.now(),
       extension: plan.extension,
       suggestedFilename,
       videoUrl,
@@ -579,6 +588,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         [key]: {
           ...previous,
           status,
+          updatedAt: Date.now(),
           ...(Number.isFinite(message.bytes) && { bytes: message.bytes }),
           ...(typeof message.error === 'string' && { error: message.error.slice(0, 300) }),
           ...(status === 'complete' && { completedAt: Date.now() }),
@@ -593,9 +603,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'sabr-task-state') {
     const extensionPage = chrome.runtime.getURL('download.html');
     const taskId = typeof message.taskId === 'string' ? message.taskId : '';
-    if (!sender.url?.startsWith(extensionPage) || !/^[\w-]{36}$/.test(taskId)) return;
-    chrome.storage.session.get(`${sabrTaskPrefix}${taskId}`).then(stored => {
-      sendResponse({ state: stored[`${sabrTaskPrefix}${taskId}`] ?? null });
+    if (sender.url?.split(/[?#]/)[0] !== extensionPage || !/^[\w-]{36}$/.test(taskId)) return;
+    const key = `${sabrTaskPrefix}${taskId}`;
+    chrome.storage.session.get(key).then(async stored => {
+      let state = stored[key] ?? null;
+      if (state?.status === 'running' && Date.now() - (state.updatedAt ?? state.startedAt ?? 0) > 90_000) {
+        await cancelOffscreenSabrTask(taskId);
+        state = {...state, status:'failed', error:'A transferência deixou de responder. Volta ao vídeo e tenta novamente.'};
+        await chrome.storage.session.set({[key]:state});
+        await removeSabrOriginRuleIfIdle();
+      }
+      sendResponse({ state });
     }).catch(error => sendResponse({ error: messageError(error) }));
     return true;
   }
@@ -603,7 +621,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'cancel-sabr-task') {
     const extensionPage = chrome.runtime.getURL('download.html');
     const taskId = typeof message.taskId === 'string' ? message.taskId : '';
-    if (!sender.url?.startsWith(extensionPage) || !/^[\w-]{36}$/.test(taskId)) return;
+    if (sender.url?.split(/[?#]/)[0] !== extensionPage || !/^[\w-]{36}$/.test(taskId)) return;
     cancelOffscreenSabrTask(taskId).then(() => sendResponse({ accepted: true }))
       .catch(error => sendResponse({ error: messageError(error) }));
     return true;
@@ -612,13 +630,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'consume-pending-download') {
     const extensionPage = chrome.runtime.getURL('download.html');
     const taskId = typeof message.taskId === 'string' ? message.taskId : '';
-    if (!sender.url?.startsWith(extensionPage) || !/^[\w-]{36}$/.test(taskId)) return;
+    if (sender.url?.split(/[?#]/)[0] !== extensionPage || !/^[\w-]{36}$/.test(taskId)) return;
     const key = `pending:${taskId}`;
     chrome.storage.session.get(key).then(async stored => {
       const task = stored[key];
-      if (task) await chrome.storage.session.remove(key);
       sendResponse(task ? { task } : { error: 'O pedido de download expirou. Volta ao vídeo e tenta novamente.' });
     }).catch(error => sendResponse({ error: messageError(error) }));
+    return true;
+  }
+
+  if (message.type === 'finish-download-task') {
+    if (sender.url?.split(/[?#]/)[0] !== chrome.runtime.getURL('download.html') || !/^[\w-]{36}$/.test(message.taskId ?? '')) return;
+    Promise.all([chrome.storage.session.remove(`pending:${message.taskId}`), chrome.storage.session.remove(`${sabrTaskPrefix}${message.taskId}`)])
+      .then(() => sendResponse({accepted:true})).catch(error => sendResponse({error:messageError(error)}));
     return true;
   }
 

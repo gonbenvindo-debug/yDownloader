@@ -22,7 +22,8 @@ export function createPlayerReader({
   fetchImpl = fetch, timeoutMs = 8000, now = Date.now,
 } = {}) {
   const cache = new Map();
-  return async videoId => {
+  const inFlight = new Map();
+  async function readSnapshot(videoId) {
     if (!/^[\w-]{11}$/.test(videoId)) throw new Error('O endereço do vídeo é inválido.');
     const cached = cache.get(videoId);
     // Script text is visible in the isolated content world even if MAIN is unavailable.
@@ -63,5 +64,11 @@ export function createPlayerReader({
       throw new Error('Não foi possível ler a página do vídeo no YouTube. Atualiza a página e tenta novamente.');
     }
     throw failure ?? new Error('O player ainda não forneceu as resoluções deste vídeo.');
+  }
+  return videoId => {
+    if (inFlight.has(videoId)) return inFlight.get(videoId);
+    const pending = readSnapshot(videoId).finally(() => inFlight.delete(videoId));
+    inFlight.set(videoId, pending);
+    return pending;
   };
 }
