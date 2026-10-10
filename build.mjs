@@ -42,12 +42,6 @@ await Promise.all([
   }),
   build({
     ...common,
-    entryPoints: [join(root, 'src', 'download.js')],
-    outfile: join(extension, 'download.js'),
-    format: 'iife',
-  }),
-  build({
-    ...common,
     entryPoints: [join(root, 'src', 'sabr-offscreen.js')],
     outfile: join(extension, 'sabr-offscreen.js'),
     format: 'iife',

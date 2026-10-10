@@ -381,7 +381,7 @@ async function ensureSabrOffscreenDocument() {
     await chrome.offscreen.createDocument({
       url: 'sabr.html',
       reasons: ['BLOBS'],
-      justification: 'Transferir streams SABR para ficheiros temporários no armazenamento local e uni-los no browser.',
+      justification: 'Transferir, unir e entregar streams de vídeo localmente sem abrir uma página ou separador.',
     });
   })();
   try {
@@ -426,7 +426,9 @@ async function removeSabrOriginRuleIfIdle() {
 
 async function startOffscreenSabrTask(taskId, task) {
   const stateKey = `${sabrTaskPrefix}${taskId}`;
-  await chrome.storage.session.set({ [stateKey]: { status: 'running', bytes: 0, startedAt: Date.now(), updatedAt: Date.now() } });
+  await chrome.storage.session.set({ [stateKey]: {
+    status: 'running', phase: 'preparing', bytes: 0, startedAt: Date.now(), updatedAt: Date.now(),
+  } });
   try {
     await ensureSabrOffscreenDocument();
     await registerSabrOriginRule();
@@ -435,14 +437,32 @@ async function startOffscreenSabrTask(taskId, task) {
       type: 'start-sabr-download',
       taskId,
       sabr: task.sabr,
+      task: task.task,
     });
-    if (!response?.accepted) throw new Error(response?.error || 'A página local de transferência não iniciou.');
+    if (!response?.accepted) throw new Error(response?.error || 'A transferência local não iniciou.');
   } catch (error) {
     await chrome.storage.session.set({ [stateKey]: {
       status: 'failed',
       error: error instanceof Error ? error.message : 'Não foi possível iniciar o transporte SABR.',
     } });
     await removeSabrOriginRuleIfIdle();
+    throw error;
+  }
+}
+
+async function startOffscreenMergeTask(taskId, task) {
+  const stateKey = `${sabrTaskPrefix}${taskId}`;
+  await chrome.storage.session.set({ [stateKey]: {
+    status: 'running', phase: 'preparing', bytes: 0, startedAt: Date.now(), updatedAt: Date.now(),
+  } });
+  try {
+    await ensureSabrOffscreenDocument();
+    const response = await chrome.runtime.sendMessage({
+      target: 'sabr-offscreen', type: 'start-merge-download', taskId, task,
+    });
+    if (!response?.accepted) throw new Error(response?.error || 'A preparação local não iniciou.');
+  } catch (error) {
+    await chrome.storage.session.remove(stateKey);
     throw error;
   }
 }
@@ -501,15 +521,8 @@ async function startDownload(videoId, videoTitle, height, mode, tabId, playerDat
     });
 
     try {
-      await startOffscreenSabrTask(taskId, { sabr });
-      const helper = await chrome.tabs.create({
-        url: `${chrome.runtime.getURL('download.html')}?task=${taskId}`,
-        active: false,
-      });
-      await chrome.storage.session.set({ [pendingKey]: {
-        ...(await chrome.storage.session.get(pendingKey))[pendingKey],
-        helperTabId: helper.id,
-      } });
+      const { [pendingKey]: pending } = await chrome.storage.session.get(pendingKey);
+      await startOffscreenSabrTask(taskId, { sabr, task: pending });
     } catch (error) {
       await cancelOffscreenSabrTask(taskId);
       await chrome.storage.session.remove(pendingKey);
@@ -563,11 +576,8 @@ async function startDownload(videoId, videoTitle, height, mode, tabId, playerDat
   });
 
   try {
-    const helper = await chrome.tabs.create({
-      url: `${chrome.runtime.getURL('download.html')}?task=${taskId}`,
-      active: false,
-    });
-    await chrome.storage.session.set({ [key]: { ...((await chrome.storage.session.get(key))[key]), helperTabId: helper.id } });
+    const { [key]: pending } = await chrome.storage.session.get(key);
+    await startOffscreenMergeTask(taskId, pending);
   } catch (error) {
     await chrome.storage.session.remove(key);
     throw error;
@@ -584,9 +594,15 @@ chrome.downloads.onCreated.addListener(item => {
     if (!match) return;
     const [key, task] = match;
     const updated = { ...task, status: 'downloading', downloadId: item.id, bytes: item.totalBytes };
-    return chrome.storage.session.set({ [key]: updated }).then(() =>
-      chrome.runtime.sendMessage({ target: 'download-page', type: 'download-started', taskId: task.taskId }).catch(() => {}),
-    );
+    return chrome.storage.session.set({ [key]: updated }).then(() => Promise.all([
+      chrome.runtime.sendMessage({
+        target: 'sabr-offscreen', type: 'sabr-download-started', taskId: task.taskId,
+      }).catch(() => {}),
+      chrome.storage.session.set({ [`${sabrTaskPrefix}${task.taskId}`]: {
+        ...(entries[`${sabrTaskPrefix}${task.taskId}`] ?? {}),
+        status: 'running', phase: 'downloading', bytes: item.totalBytes, updatedAt: Date.now(),
+      } }),
+    ]));
   }).catch(() => {});
 });
 
@@ -599,21 +615,29 @@ chrome.downloads.onChanged.addListener(delta => {
     if (!match) return;
     const [key, task] = match;
     const completed = delta.state.current === 'complete';
+    const error = completed ? undefined
+      : `O Chrome interrompeu a gravação${delta.error?.current ? ` (${delta.error.current})` : ''}.`;
     const updated = {
       ...task,
       status: completed ? 'complete' : 'failed',
-      ...(delta.error?.current && { error: `O Chrome interrompeu a gravação (${delta.error.current}).` }),
+      ...(error && { error }),
     };
-    return chrome.storage.session.set({ [key]: updated }).then(() => Promise.all([
+    return Promise.all([
+      chrome.storage.session.set({
+        [key]: updated,
+        [`${sabrTaskPrefix}${task.taskId}`]: {
+          status: updated.status, phase: updated.status, bytes: delta.totalBytes?.current,
+          updatedAt: Date.now(), ...(error && { error }),
+        },
+      }),
       chrome.runtime.sendMessage({
-        target: 'download-page', type: 'download-finished',
-        taskId: task.taskId, status: updated.status,
+        target: 'sabr-offscreen', type: 'sabr-download-finished', taskId: task.taskId,
       }).catch(() => {}),
-      Number.isInteger(task.tabId) && chrome.tabs.sendMessage(task.tabId, {
+      Number.isInteger(task.tabId) ? chrome.tabs.sendMessage(task.tabId, {
         target: 'youtube-download', type: 'download-task-finished',
         taskId: task.taskId, status: updated.status, error: updated.error,
-      }).catch(() => {}),
-    ]));
+      }).catch(() => {}) : Promise.resolve(),
+    ]).then(() => removeSabrOriginRuleIfIdle());
   }).catch(() => {});
 });
 
@@ -633,110 +657,47 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === 'sabr-job-state') {
     if (sender.url !== sabrOffscreenUrl || !/^[\w-]{36}$/.test(message.taskId ?? '')) return;
-    const status = ['running', 'complete', 'failed', 'cancelled'].includes(message.status)
+    const status = ['running', 'failed', 'cancelled'].includes(message.status)
       ? message.status
       : 'failed';
     const key = `${sabrTaskPrefix}${message.taskId}`;
-    chrome.storage.session.get(key).then(async stored => {
+    const pendingKey = `pending:${message.taskId}`;
+    chrome.storage.session.get([key, pendingKey]).then(async stored => {
       const previous = stored[key] ?? {};
-      await chrome.storage.session.set({
-        [key]: {
-          ...previous,
-          status,
-          updatedAt: Date.now(),
-          ...(Number.isFinite(message.bytes) && { bytes: message.bytes }),
-          ...(typeof message.error === 'string' && { error: message.error.slice(0, 300) }),
-          ...(status === 'complete' && { completedAt: Date.now() }),
-        },
-      });
-      if (status !== 'running') await removeSabrOriginRuleIfIdle();
-      sendResponse({ accepted: true });
-    }).catch(error => sendResponse({ error: messageError(error) }));
-    return true;
-  }
-
-  if (message.type === 'sabr-task-state') {
-    const extensionPage = chrome.runtime.getURL('download.html');
-    const taskId = typeof message.taskId === 'string' ? message.taskId : '';
-    if (sender.url?.split(/[?#]/)[0] !== extensionPage || !/^[\w-]{36}$/.test(taskId)) return;
-    const key = `${sabrTaskPrefix}${taskId}`;
-    chrome.storage.session.get(key).then(async stored => {
-      let state = stored[key] ?? null;
-      if (state?.status === 'running' && Date.now() - (state.updatedAt ?? state.startedAt ?? 0) > 90_000) {
-        await cancelOffscreenSabrTask(taskId);
-        state = {...state, status:'failed', error:'A transferência deixou de responder. Volta ao vídeo e tenta novamente.'};
-        await chrome.storage.session.set({[key]:state});
-        await removeSabrOriginRuleIfIdle();
-      }
-      sendResponse({ state });
-    }).catch(error => sendResponse({ error: messageError(error) }));
-    return true;
-  }
-
-  if (message.type === 'cancel-sabr-task') {
-    const extensionPage = chrome.runtime.getURL('download.html');
-    const taskId = typeof message.taskId === 'string' ? message.taskId : '';
-    if (sender.url?.split(/[?#]/)[0] !== extensionPage || !/^[\w-]{36}$/.test(taskId)) return;
-    cancelOffscreenSabrTask(taskId).then(() => sendResponse({ accepted: true }))
-      .catch(error => sendResponse({ error: messageError(error) }));
-    return true;
-  }
-
-  if (message.type === 'consume-pending-download') {
-    const extensionPage = chrome.runtime.getURL('download.html');
-    const taskId = typeof message.taskId === 'string' ? message.taskId : '';
-    if (sender.url?.split(/[?#]/)[0] !== extensionPage || !/^[\w-]{36}$/.test(taskId)) return;
-    const key = `pending:${taskId}`;
-    chrome.storage.session.get(key).then(async stored => {
-      let task = stored[key];
-      if (task && Number.isInteger(sender.tab?.id)) {
-        if (Number.isInteger(task.helperTabId) && task.helperTabId !== sender.tab.id) {
-          sendResponse({ error: 'Este pedido já está aberto noutra página.' });
-          return;
-        }
-        if (!Number.isInteger(task.helperTabId)) {
-          task = { ...task, helperTabId: sender.tab.id };
-          await chrome.storage.session.set({ [key]: task });
-        }
-      }
-      sendResponse(task ? { task } : { error: 'O pedido de download expirou. Volta ao vídeo e tenta novamente.' });
-    }).catch(error => sendResponse({ error: messageError(error) }));
-    return true;
-  }
-
-  if (message.type === 'download-page-state') {
-    const extensionPage = chrome.runtime.getURL('download.html');
-    const taskId = typeof message.taskId === 'string' ? message.taskId : '';
-    const allowed = ['preparing', 'transferring', 'muxing', 'ready', 'downloading', 'failed'];
-    if (sender.url?.split(/[?#]/)[0] !== extensionPage || !/^[\w-]{36}$/.test(taskId)
-      || !allowed.includes(message.status)) return;
-    const key = `pending:${taskId}`;
-    chrome.storage.session.get(key).then(async stored => {
-      const task = stored[key];
-      if (!task || task.helperTabId !== sender.tab?.id) {
-        sendResponse({ accepted: false });
-        return;
-      }
-      const objectUrl = message.status === 'ready' ? message.objectUrl : undefined;
+      const pending = stored[pendingKey];
+      const phase = ['preparing', 'transferring', 'muxing', 'downloading'].includes(message.phase)
+        ? message.phase : status;
+      const error = typeof message.error === 'string' ? message.error.slice(0, 300) : undefined;
+      const objectUrl = typeof message.objectUrl === 'string' ? message.objectUrl : undefined;
       if (objectUrl && !objectUrl.startsWith(`blob:${chrome.runtime.getURL('')}`)) {
         sendResponse({ accepted: false });
         return;
       }
-      await chrome.storage.session.set({ [key]: {
-        ...task,
-        status: message.status,
-        ...(Number.isFinite(message.bytes) && { bytes: message.bytes }),
-        ...(objectUrl && { objectUrl }),
-        ...(message.status === 'failed' && typeof message.error === 'string'
-          && { error: message.error.slice(0, 300) }),
-      } });
-      sendResponse({ accepted: true });
-      if (message.status === 'failed' && Number.isInteger(task.tabId)) {
-        chrome.tabs.sendMessage(task.tabId, {
-          target: 'youtube-download', type: 'download-task-finished', taskId,
-          status: 'failed', error: message.error,
+      await chrome.storage.session.set({
+        [key]: {
+          ...previous,
+          status,
+          phase,
+          updatedAt: Date.now(),
+          ...(Number.isFinite(message.bytes) && { bytes: message.bytes }),
+          ...(error && { error }),
+        },
+        ...(pending && { [pendingKey]: {
+          ...pending,
+          status: status === 'running' ? phase : status,
+          ...(Number.isFinite(message.bytes) && { bytes: message.bytes }),
+          ...(objectUrl && { objectUrl }),
+          ...(error && { error }),
+        } }),
+      });
+      if (status !== 'running') {
+        await removeSabrOriginRuleIfIdle();
+        if (Number.isInteger(pending?.tabId)) chrome.tabs.sendMessage(pending.tabId, {
+          target: 'youtube-download', type: 'download-task-finished',
+          taskId: message.taskId, status: 'failed', error,
         }).catch(() => {});
       }
+      sendResponse({ accepted: true });
     }).catch(error => sendResponse({ error: messageError(error) }));
     return true;
   }
@@ -746,40 +707,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!/^[\w-]{36}$/.test(taskId) || !Number.isInteger(sender.tab?.id)) return;
     const pendingKey = `pending:${taskId}`;
     const sabrKey = `${sabrTaskPrefix}${taskId}`;
-    chrome.storage.session.get([pendingKey, sabrKey]).then(stored => {
-      const task = stored[pendingKey];
+    chrome.storage.session.get([pendingKey, sabrKey]).then(async stored => {
+      let task = stored[pendingKey];
+      let transfer = stored[sabrKey];
       if (!task || task.tabId !== sender.tab.id) {
         sendResponse({ error: 'A tarefa de download já não está disponível.' });
         return;
       }
-      const transfer = stored[sabrKey];
+      if (transfer?.status === 'running'
+        && Date.now() - (transfer.updatedAt ?? transfer.startedAt ?? 0) > 90_000) {
+        await cancelOffscreenSabrTask(taskId);
+        const error = 'A transferência deixou de responder. Volta ao vídeo e tenta novamente.';
+        task = { ...task, status: 'failed', error };
+        transfer = { ...transfer, status: 'failed', phase: 'failed', error, updatedAt: Date.now() };
+        await chrome.storage.session.set({ [pendingKey]: task, [sabrKey]: transfer });
+        await removeSabrOriginRuleIfIdle();
+      }
       sendResponse({ state: {
-        status: task.status ?? (transfer?.status === 'running' ? 'transferring' : 'preparing'),
+        status: task.status ?? (transfer?.status === 'running' ? transfer.phase : transfer?.status ?? 'preparing'),
         bytes: task.bytes ?? transfer?.bytes ?? 0,
         error: task.error ?? transfer?.error,
       } });
-    }).catch(error => sendResponse({ error: messageError(error) }));
-    return true;
-  }
-
-  if (message.type === 'finish-download-task') {
-    if (sender.url?.split(/[?#]/)[0] !== chrome.runtime.getURL('download.html') || !/^[\w-]{36}$/.test(message.taskId ?? '')) return;
-    chrome.storage.session.get(`pending:${message.taskId}`).then(async stored => {
-      const task = stored[`pending:${message.taskId}`];
-      if (!task || task.helperTabId !== sender.tab?.id) {
-        sendResponse({ accepted: false });
-        return;
-      }
-      if (task.status === 'complete') {
-        await chrome.storage.session.remove(`pending:${message.taskId}`);
-      } else {
-        await chrome.storage.session.set({ [`pending:${message.taskId}`]: {
-          ...task, helperTabId: undefined, objectUrl: undefined,
-        } });
-      }
-      await chrome.storage.session.remove(`${sabrTaskPrefix}${message.taskId}`);
-      sendResponse({ accepted: true });
-      if (Number.isInteger(sender.tab.id)) chrome.tabs.remove(sender.tab.id).catch(() => {});
     }).catch(error => sendResponse({ error: messageError(error) }));
     return true;
   }

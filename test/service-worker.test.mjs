@@ -25,7 +25,7 @@ globalThis.chrome = {
   webRequest: {onBeforeRequest:event('request')},
   tabs: {
     onRemoved:event('removed'),get:async()=>({...sender.tab,url:sender.url}),
-    create:async options=>{opened=options;return{id:43};},sendMessage:async()=>{},remove:async()=>{},
+    create:async options=>{opened=options;throw new Error('The extension must never open a download tab.');},sendMessage:async()=>{},remove:async()=>{},
   },
   storage: {session:{
     get: async key => {
@@ -131,29 +131,11 @@ test('direct playback URLs reuse the page formats without a new player request',
   assert.equal(fetchCalls,0);
 });
 
-test('the hidden helper retains its task until the browser finishes saving', async () => {
-  const taskId = crypto.randomUUID();
-  const page = {url:`chrome-extension://test/download.html?task=${taskId}`,tab:{id:43}};
-  stored[`pending:${taskId}`] = {taskId, helperTabId:43, status:'downloading', title:'Retained task'};
-  for (let count=0;count<2;count++) {
-    const result = await message({type:'consume-pending-download',taskId},page);
-    assert.equal(result.task.title,'Retained task');
-  }
-  stored[`pending:${taskId}`].status = 'complete';
-  stored[`sabr-task:${taskId}`] = {status:'complete'};
-  assert.deepEqual(await message({type:'finish-download-task',taskId},page),{accepted:true});
-  assert.equal(stored[`pending:${taskId}`],undefined);
-  assert.equal(stored[`sabr-task:${taskId}`],undefined);
-});
-
-test('a similar URL cannot read extension download tasks', async () => {
-  await assert.rejects(message({type:'consume-pending-download',taskId:crypto.randomUUID()}, {url:'chrome-extension://test/download.html.attacker'}), /not accepted/);
-});
-
 test('a crashed offscreen transfer stops waiting after missing heartbeats', async () => {
   const taskId = crypto.randomUUID();
   stored[`sabr-task:${taskId}`] = {status:'running',bytes:10,updatedAt:Date.now()-100000};
-  const result = await message({type:'sabr-task-state',taskId}, {url:'chrome-extension://test/download.html'});
+  stored[`pending:${taskId}`] = {taskId,tabId:42,status:'transferring'};
+  const result = await message({type:'download-task-state',taskId});
   assert.equal(result.state.status,'failed');
   assert.match(result.state.error,/deixou de responder/);
   assert.equal(sabrJob.type,'cancel-sabr-download');
@@ -167,8 +149,21 @@ test('SABR transfer preparation reuses page metadata and the captured playback s
   assert.equal(sabrJob.sabr.videoFormat.itag,133);
   assert.equal(sabrJob.sabr.audioFormat.itag,140);
   assert.equal(sabrJob.sabr.durationMs,19000);
-  assert.ok(opened.url.startsWith('chrome-extension://test/download.html?task='));
-  assert.equal(opened.active,false);
+  assert.equal(opened,undefined);
+  assert.equal(stored[`pending:${result.taskId}`].tabId,42);
+  assert.equal(fetchCalls,0);
+});
+
+test('separate audio and video are processed offscreen without opening a tab', async () => {
+  const snapshot={videoId,title:'Me at the zoo',durationSeconds:19,qualities:[],streamingData:{adaptiveFormats:[
+    {itag:137,mimeType:'video/mp4; codecs="avc1.640028"',width:1920,height:1080,qualityLabel:'1080p',bitrate:2500000,url:'https://r1.test.googlevideo.com/videoplayback?itag=137'},
+    {itag:140,mimeType:'audio/mp4; codecs="mp4a.40.2"',audioQuality:'AUDIO_QUALITY_MEDIUM',bitrate:128000,url:'https://r1.test.googlevideo.com/videoplayback?itag=140'},
+  ]}};
+  const result=await message({type:'download',resolution:1080,mode:'merge',playerData:snapshot});
+  assert.equal(typeof result.taskId,'string');
+  assert.equal(sabrJob.type,'start-merge-download');
+  assert.equal(sabrJob.task.mode,'merge');
+  assert.equal(opened,undefined);
   assert.equal(stored[`pending:${result.taskId}`].tabId,42);
   assert.equal(fetchCalls,0);
 });

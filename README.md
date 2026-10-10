@@ -19,7 +19,8 @@ Não é necessário instalar Node.js para usar a extensão já compilada incluí
 - Quando o YouTube não expõe URLs diretas, a extensão pode reutilizar a sessão SABR criada pelo player ativo. `googlevideo` lê o protocolo e transfere os segmentos numa página offscreen do Chrome; os ficheiros temporários ficam no armazenamento privado do browser.
 - Quando um URL direto exige decifrar uma assinatura, uma sessão SABR válida também pode ser usada para evitar outro pedido de extração à API.
 - Formatos que já incluem áudio e vídeo são guardados pelo gestor de downloads do browser.
-- Ao escolher uma resolução, o YouTube mantém-se no separador ativo e o botão mostra o progresso. Uma página auxiliar inativa une áudio e vídeo no browser, sem manter o vídeo inteiro em memória; quando termina, o Chrome entrega o ficheiro na pasta de downloads configurada. A página auxiliar fecha no fim.
+- Ao escolher uma resolução, o YouTube mantém-se no único separador aberto e o botão mostra o progresso. A transferência e a união de áudio e vídeo correm no documento offscreen da extensão, sem abrir páginas ou separadores; o ficheiro é entregue na pasta de downloads configurada.
+- MP4 e WebM são contentores do ficheiro. Nas resoluções 1440p e 2160p, o YouTube fornece vídeo VP9 e áudio Opus, que são guardados em WebM; as resoluções até 1080p usam MP4 quando há streams compatíveis.
 - O QuickJS/WebAssembly executa o pequeno código de assinatura do player dentro de um interpretador isolado. O código dinâmico não é executado no contexto da extensão.
 
 ## Compilar a extensão
@@ -35,7 +36,7 @@ O build também atualiza a versão descompactada na pasta fixa `../../outputs/yD
 
 ## Verificação
 
-`npm test` verifica o leitor, a ponte MAIN/isolated, a validação e cancelamento de streams, tarefas de download e o worker compilado. `npm run test:youtube` lê três páginas públicas e compara as resoluções do worker com os formatos do YouTube. `npm run test:chrome` abre um perfil isolado, confirma que o separador do YouTube permanece ativo, descarrega o vídeo pelo fluxo normal da extensão e verifica resolução, duração, codecs, pacotes e SHA-256. A transferência 4K verificada foi [Big Buck Bunny 4K](https://www.youtube.com/watch?v=aqz-KE-bpKQ); o relatório local regista os detalhes do ficheiro.
+`npm test` verifica o leitor, a ponte MAIN/isolated, a validação e cancelamento de streams, tarefas de download e o worker compilado. `npm run test:youtube` lê três páginas públicas e compara as resoluções do worker com os formatos do YouTube. `npm run test:chrome` abre um perfil isolado, confirma que só existe o separador do YouTube durante todo o processo, descarrega o vídeo pelo fluxo normal da extensão e verifica resolução, duração, codecs, pacotes e SHA-256. A transferência 4K verificada foi [Big Buck Bunny 4K](https://www.youtube.com/watch?v=aqz-KE-bpKQ); o relatório local regista os detalhes do ficheiro.
 
 O teste do Chrome usa `../../outputs/test-4k` para guardar o ficheiro e o relatório. Pode receber um vídeo público e resolução alternativos através de `TEST_VIDEO_URL`, `TEST_RESOLUTION` e `TEST_OUTPUT_DIR`. A transferência, a união e a entrega automática usam a implementação real da extensão.
 

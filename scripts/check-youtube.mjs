@@ -10,6 +10,7 @@ const ignoreEvent = { addListener() {} };
 globalThis.chrome = {
   runtime: {getURL:path=>`chrome-extension://check/${path}`,onMessage:{addListener:listener=>{onMessage=listener;}}},
   webRequest:{onBeforeRequest:ignoreEvent},tabs:{onRemoved:ignoreEvent},
+  downloads:{onCreated:ignoreEvent,onChanged:ignoreEvent},
 };
 await import('../extension/service-worker.js');
 const realFetch = globalThis.fetch;
