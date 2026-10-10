@@ -23,13 +23,24 @@ globalThis.chrome = {
     sendMessage: async message => { sabrJob = message; return {accepted:true}; },
   },
   webRequest: {onBeforeRequest:event('request')},
-  tabs: {onRemoved:event('removed'),get:async()=>({...sender.tab,url:sender.url}),create:async options=>{opened=options;return{id:43};}},
+  tabs: {
+    onRemoved:event('removed'),get:async()=>({...sender.tab,url:sender.url}),
+    create:async options=>{opened=options;return{id:43};},sendMessage:async()=>{},remove:async()=>{},
+  },
   storage: {session:{
-    get: async key => { storageReads++; return key === null ? {...stored} : {[key]:stored[key]}; },
+    get: async key => {
+      storageReads++;
+      if (key === null) return {...stored};
+      if (Array.isArray(key)) return Object.fromEntries(key.map(name => [name, stored[name]]));
+      return {[key]:stored[key]};
+    },
     set: async data => Object.assign(stored,data),
     remove: async key => { delete stored[key]; },
   }},
-  downloads: {download:(options,callback)=>{downloaded=options;callback(123);}},
+  downloads: {
+    onCreated:event('download-created'),onChanged:event('download-changed'),
+    download:(options,callback)=>{downloaded=options;callback(123);},
+  },
   offscreen: {createDocument:async()=>{}},
   declarativeNetRequest: {updateSessionRules:async()=>{}},
 };
@@ -120,14 +131,15 @@ test('direct playback URLs reuse the page formats without a new player request',
   assert.equal(fetchCalls,0);
 });
 
-test('download page reload preserves a task until successful saving', async () => {
+test('the hidden helper retains its task until the browser finishes saving', async () => {
   const taskId = crypto.randomUUID();
-  const page = {url:`chrome-extension://test/download.html?task=${taskId}`};
-  stored[`pending:${taskId}`] = {taskId, title:'Retained task'};
+  const page = {url:`chrome-extension://test/download.html?task=${taskId}`,tab:{id:43}};
+  stored[`pending:${taskId}`] = {taskId, helperTabId:43, status:'downloading', title:'Retained task'};
   for (let count=0;count<2;count++) {
     const result = await message({type:'consume-pending-download',taskId},page);
     assert.equal(result.task.title,'Retained task');
   }
+  stored[`pending:${taskId}`].status = 'complete';
   stored[`sabr-task:${taskId}`] = {status:'complete'};
   assert.deepEqual(await message({type:'finish-download-task',taskId},page),{accepted:true});
   assert.equal(stored[`pending:${taskId}`],undefined);
@@ -150,12 +162,14 @@ test('a crashed offscreen transfer stops waiting after missing heartbeats', asyn
 test('SABR transfer preparation reuses page metadata and the captured playback session', async () => {
   stored['sabr-session:42']={videoId,capturedAt:Date.now(),serverAbrStreamingUrl:'https://r1.test.googlevideo.com/videoplayback?sabr=1',poToken:'test-token',videoPlaybackUstreamerConfig:'test-config',clientInfo:{clientName:1}};
   const result=await message({type:'download',resolution:240,mode:'sabr',playerData:sabrSnapshot()});
-  assert.deepEqual(result,{opened:true});
+  assert.equal(typeof result.taskId,'string');
   assert.equal(sabrJob.type,'start-sabr-download');
   assert.equal(sabrJob.sabr.videoFormat.itag,133);
   assert.equal(sabrJob.sabr.audioFormat.itag,140);
   assert.equal(sabrJob.sabr.durationMs,19000);
   assert.ok(opened.url.startsWith('chrome-extension://test/download.html?task='));
+  assert.equal(opened.active,false);
+  assert.equal(stored[`pending:${result.taskId}`].tabId,42);
   assert.equal(fetchCalls,0);
 });
 
@@ -175,7 +189,7 @@ test('a real protobuf playback request provides the session used for download pr
   assert.equal(stored['sabr-session:42'].videoId,videoId);
   assert.ok(!stored['sabr-session:42'].serverAbrStreamingUrl.includes('rn='));
   const result=await message({type:'download',resolution:240,mode:'sabr',playerData:sabrSnapshot()});
-  assert.deepEqual(result,{opened:true});
+  assert.equal(typeof result.taskId,'string');
   assert.equal(sabrJob.sabr.poToken,stored['sabr-session:42'].poToken);
   assert.equal(fetchCalls,0);
 });
@@ -188,7 +202,7 @@ test('a ciphered progressive format can reuse SABR instead of the failing extrac
   }];
   stored['sabr-session:42']={videoId,capturedAt:Date.now(),serverAbrStreamingUrl:'https://r1.test.googlevideo.com/videoplayback?sabr=1',poToken:'test-token',videoPlaybackUstreamerConfig:'test-config',clientInfo:{clientName:1}};
   const result=await message({type:'download',resolution:240,mode:'direct',playerData:snapshot});
-  assert.deepEqual(result,{opened:true});
+  assert.equal(typeof result.taskId,'string');
   assert.equal(sabrJob.sabr.videoFormat.itag,133);
   assert.equal(fetchCalls,0);
 });

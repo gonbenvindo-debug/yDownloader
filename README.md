@@ -19,7 +19,7 @@ Não é necessário instalar Node.js para usar a extensão já compilada incluí
 - Quando o YouTube não expõe URLs diretas, a extensão pode reutilizar a sessão SABR criada pelo player ativo. `googlevideo` lê o protocolo e transfere os segmentos numa página offscreen do Chrome; os ficheiros temporários ficam no armazenamento privado do browser.
 - Quando um URL direto exige decifrar uma assinatura, uma sessão SABR válida também pode ser usada para evitar outro pedido de extração à API.
 - Formatos que já incluem áudio e vídeo são guardados pelo gestor de downloads do browser.
-- Quando o YouTube fornece áudio e vídeo separados, a extensão abre uma página local. Ao escolher o ficheiro de destino, o Mediabunny une os streams e grava o resultado diretamente no disco, sem manter o vídeo inteiro em memória. A mesma união é usada para segmentos SABR.
+- Ao escolher uma resolução, o YouTube mantém-se no separador ativo e o botão mostra o progresso. Uma página auxiliar inativa une áudio e vídeo no browser, sem manter o vídeo inteiro em memória; quando termina, o Chrome entrega o ficheiro na pasta de downloads configurada. A página auxiliar fecha no fim.
 - O QuickJS/WebAssembly executa o pequeno código de assinatura do player dentro de um interpretador isolado. O código dinâmico não é executado no contexto da extensão.
 
 ## Compilar a extensão
@@ -35,9 +35,9 @@ O build também atualiza a versão descompactada na pasta fixa `../../outputs/yD
 
 ## Verificação
 
-`npm test` verifica o leitor, a ponte MAIN/isolated, a validação e cancelamento de streams, tarefas após recarregar a página e o worker compilado. `npm run test:youtube` lê três páginas públicas e compara as resoluções do worker com os formatos do YouTube. `npm run test:chrome` abre um perfil isolado do Chrome, carrega a extensão, transfere e une os streams, volta a abrir a página, guarda o ficheiro e valida resolução, duração, codecs e reprodução no início, meio e fim. A transferência 4K verificada foi [Big Buck Bunny 4K](https://www.youtube.com/watch?v=aqz-KE-bpKQ); o relatório local regista duração, codecs, pacotes e SHA-256.
+`npm test` verifica o leitor, a ponte MAIN/isolated, a validação e cancelamento de streams, tarefas de download e o worker compilado. `npm run test:youtube` lê três páginas públicas e compara as resoluções do worker com os formatos do YouTube. `npm run test:chrome` abre um perfil isolado, confirma que o separador do YouTube permanece ativo, descarrega o vídeo pelo fluxo normal da extensão e verifica resolução, duração, codecs, pacotes e SHA-256. A transferência 4K verificada foi [Big Buck Bunny 4K](https://www.youtube.com/watch?v=aqz-KE-bpKQ); o relatório local regista os detalhes do ficheiro.
 
-O teste do Chrome usa `../../outputs/test-4k` para guardar o ficheiro e o relatório. Pode receber um vídeo público e resolução alternativos através de `TEST_VIDEO_URL`, `TEST_RESOLUTION` e `TEST_OUTPUT_DIR`. O teste substitui apenas o seletor nativo de destino por um ficheiro temporário do próprio Chrome; a transferência e a união passam pela implementação real da extensão.
+O teste do Chrome usa `../../outputs/test-4k` para guardar o ficheiro e o relatório. Pode receber um vídeo público e resolução alternativos através de `TEST_VIDEO_URL`, `TEST_RESOLUTION` e `TEST_OUTPUT_DIR`. A transferência, a união e a entrega automática usam a implementação real da extensão.
 
 ## Limitações
 
@@ -45,4 +45,4 @@ O teste do Chrome usa `../../outputs/test-4k` para guardar o ficheiro e o relat�
 - Vídeos privados, indisponíveis ou que exijam autenticação podem não fornecer streams à extensão.
 - O seletor pode expor uma resolução antes dos dados de transferência estarem disponíveis. Inicia a reprodução para obter a sessão de download do player.
 - A opção SABR depende de o player ativo ter criado uma sessão válida no separador atual; inicia a reprodução antes de abrir o menu de download.
-- O browser pede confirmação do ficheiro de destino nos formatos que precisam de unir áudio e vídeo.
+- O ficheiro é entregue na pasta de downloads definida nas preferências do Chrome.

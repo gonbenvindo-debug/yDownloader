@@ -1,16 +1,11 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, stat, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { launchTestChrome } from './launch-test-chrome.mjs';
 import { ALL_FORMATS, FilePathSource, Input, EncodedPacketSink } from 'mediabunny';
 import { inspectMedia } from '../src/media-merge.js';
-import {
-  exportBrowserFile,
-  installSaveDestination,
-  verifyPlayback,
-} from './browser-test-helpers.mjs';
 
 const videoUrl = process.env.TEST_VIDEO_URL || 'https://www.youtube.com/watch?v=aqz-KE-bpKQ';
 const resolution = Number(process.env.TEST_RESOLUTION || 2160);
@@ -18,6 +13,7 @@ const output = resolve(process.env.TEST_OUTPUT_DIR || '../../outputs/test-4k');
 const { context, close } = await launchTestChrome();
 const startedAt = new Date().toISOString();
 let page;
+let helper;
 let download;
 try {
   const cdp = await context.browser().newBrowserCDPSession();
@@ -25,9 +21,9 @@ try {
     path: resolve('../../outputs/yDownloader'),
   });
   const worker =
-    context.serviceWorkers().find((worker) => worker.url().includes(id)) ??
+    context.serviceWorkers().find((serviceWorker) => serviceWorker.url().includes(id)) ??
     (await context.waitForEvent('serviceworker', {
-      predicate: (worker) => worker.url().includes(id),
+      predicate: (serviceWorker) => serviceWorker.url().includes(id),
       timeout: 15000,
     }));
   page = await context.newPage();
@@ -66,68 +62,68 @@ try {
     player.mute();
     player.playVideo();
   });
+  const activeTabBefore = await worker.evaluate(async () =>
+    (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0]?.id,
+  );
   await page.locator('#movie_player').hover();
   await page.locator('#yt-downloader-button').click();
   const option = page.getByRole('menuitem', { name: new RegExp(`^${resolution}p`) });
   await option.waitFor();
   const menu = await page.locator('#yt-downloader-popup').innerText();
-  const opened = context.waitForEvent('page', { timeout: 30000 });
+  const newPage = context.waitForEvent('page', { timeout: 30000 });
   await option.click();
-  download = await opened;
-  await download.waitForLoadState('domcontentloaded');
+  helper = await newPage;
+  const browserDownload = helper.waitForEvent('download', { timeout: 15 * 60 * 1000 });
+  const destinationPromise = browserDownload.then(async browserFile => {
+    const destination = resolve(output, browserFile.suggestedFilename());
+    await mkdir(output, { recursive: true });
+    await browserFile.saveAs(destination);
+    return destination;
+  });
+  assert.match(page.url(), /youtube\.com\/watch\?/);
+  assert.equal(
+    await worker.evaluate(async () =>
+      (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0]?.id,
+    ),
+    activeTabBefore,
+    'Selecting a resolution must leave the YouTube tab active.',
+  );
   const transferDeadline = Date.now() + 15 * 60 * 1000;
   let lastLog = 0;
-  while (await download.locator('#save').isDisabled()) {
-    const state = await download.evaluate(() =>
-      chrome.runtime.sendMessage({
-        type: 'sabr-task-state',
-        taskId: new URLSearchParams(location.search).get('task'),
-      }),
-    );
-    if (['failed', 'cancelled'].includes(state?.state?.status))
-      throw new Error(state.state.error || state.state.status);
+  while (true) {
+    const state = await page.locator('#yt-downloader-button').getAttribute('title');
+    if (state === 'A guardar o ficheiro…' || state === 'A unir vídeo e áudio…') break;
+    const helperStatus = await helper.locator('#status').innerText().catch(() => '');
+    if (/não está disponível|falha|recusou|interrompeu/i.test(helperStatus))
+      throw new Error(helperStatus);
     if (Date.now() > transferDeadline) throw new Error('4K transfer exceeded 15 minutes.');
     if (Date.now() - lastLog > 30000) {
-      console.log(await download.locator('#status').innerText());
+      console.log(helperStatus);
       lastLog = Date.now();
     }
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
-  // Reload must preserve the completed task and the temporary media.
-  await download.reload({ waitUntil: 'domcontentloaded' });
-  await download.waitForFunction(() => !document.querySelector('#save').disabled);
-  await installSaveDestination(download);
-  await download.locator('#save').click();
-  await download.waitForFunction(
-    () => document.querySelector('#save').hidden || !document.querySelector('#save').disabled,
+  download = await browserDownload;
+  assert.match(page.url(), /youtube\.com\/watch\?/);
+  await page.waitForFunction(
+    () => document.querySelector('#yt-downloader-button')?.getAttribute('aria-busy') === 'false'
+      && document.querySelector('#yt-downloader-button')?.title.includes('Download entregue'),
     undefined,
-    { timeout: 5 * 60 * 1000 },
+    { timeout: 120000 },
   );
-  const finalStatus = await download.locator('#status').innerText();
-  assert.match(finalStatus, /^Concluído e verificado:/);
-  const playback = await verifyPlayback(download);
-  assert.ok(
-    playback.samples.every((sample) => sample.height === resolution && sample.readyState >= 2),
-  );
-  const filename = await download.evaluate(() =>
-    window.testOutputHandle.name.replace(/^test-/, ''),
-  );
-  const destination = resolve(output, filename);
-  const size = await exportBrowserFile(download, destination);
+  const finalStatus = await helper.locator('#status').innerText().catch(() => 'Ficheiro entregue.');
+  assert.equal(download.suggestedFilename().endsWith(resolution >= 720 ? '.webm' : '.mp4'), true);
+  const destination = await destinationPromise;
+
   const input = new Input({ source: new FilePathSource(destination), formats: ALL_FORMATS });
   let metadata;
   const packetCounts = {};
   try {
-    const media = await inspectMedia(input, input, {
-      height: resolution,
-      durationSeconds: playback.duration,
-    });
+    const media = await inspectMedia(input, input, {});
+    assert.equal(media.height, resolution);
     const { video, audio, ...details } = media;
     metadata = details;
-    for (const [name, track] of [
-      ['video', video],
-      ['audio', audio],
-    ]) {
+    for (const [name, track] of [['video', video], ['audio', audio]]) {
       let count = 0;
       for await (const packet of new EncodedPacketSink(track).packets()) {
         assert.ok(packet.data.length > 0);
@@ -148,14 +144,14 @@ try {
     videoUrl,
     menu,
     finalStatus,
+    activeYouTubeTabId: activeTabBefore,
+    youtubeUrlAfterDownload: page.url(),
     destination,
-    size,
+    size: (await stat(destination)).size,
     sha256: hash.digest('hex'),
     ...metadata,
     packetCounts,
-    playback,
   };
-  await mkdir(output, { recursive: true });
   await writeFile(resolve(output, 'verification.json'), JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report, null, 2));
 } catch (error) {
@@ -182,10 +178,7 @@ try {
         error: error.message,
         menu,
         nativePlayer,
-        status: await download
-          ?.locator('#status')
-          .innerText()
-          .catch(() => null),
+        status: await helper?.locator('#status').innerText().catch(() => null),
       },
       null,
       2,

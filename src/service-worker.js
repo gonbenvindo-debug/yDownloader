@@ -486,6 +486,7 @@ async function startDownload(videoId, videoTitle, height, mode, tabId, playerDat
     await chrome.storage.session.set({
       [pendingKey]: {
         taskId,
+        tabId,
         mode: 'sabr',
         videoId,
         title: info.basic_info.title || filename,
@@ -501,13 +502,20 @@ async function startDownload(videoId, videoTitle, height, mode, tabId, playerDat
 
     try {
       await startOffscreenSabrTask(taskId, { sabr });
-      await chrome.tabs.create({ url: `${chrome.runtime.getURL('download.html')}?task=${taskId}` });
+      const helper = await chrome.tabs.create({
+        url: `${chrome.runtime.getURL('download.html')}?task=${taskId}`,
+        active: false,
+      });
+      await chrome.storage.session.set({ [pendingKey]: {
+        ...(await chrome.storage.session.get(pendingKey))[pendingKey],
+        helperTabId: helper.id,
+      } });
     } catch (error) {
       await cancelOffscreenSabrTask(taskId);
       await chrome.storage.session.remove(pendingKey);
       throw error;
     }
-    return { opened: true };
+    return { taskId };
   }
 
   const { info, client } = localDirectPlan
@@ -538,6 +546,7 @@ async function startDownload(videoId, videoTitle, height, mode, tabId, playerDat
   await chrome.storage.session.set({
     [key]: {
       taskId,
+      tabId,
       mode: 'merge',
       videoId,
       title: info.basic_info.title || filename,
@@ -554,13 +563,59 @@ async function startDownload(videoId, videoTitle, height, mode, tabId, playerDat
   });
 
   try {
-    await chrome.tabs.create({ url: `${chrome.runtime.getURL('download.html')}?task=${taskId}` });
+    const helper = await chrome.tabs.create({
+      url: `${chrome.runtime.getURL('download.html')}?task=${taskId}`,
+      active: false,
+    });
+    await chrome.storage.session.set({ [key]: { ...((await chrome.storage.session.get(key))[key]), helperTabId: helper.id } });
   } catch (error) {
     await chrome.storage.session.remove(key);
     throw error;
   }
-  return { opened: true };
+  return { taskId };
 }
+
+chrome.downloads.onCreated.addListener(item => {
+  if (!item.url?.startsWith(`blob:${chrome.runtime.getURL('')}`)) return;
+  chrome.storage.session.get(null).then(entries => {
+    const match = Object.entries(entries).find(([key, task]) =>
+      key.startsWith('pending:') && task?.objectUrl === item.url,
+    );
+    if (!match) return;
+    const [key, task] = match;
+    const updated = { ...task, status: 'downloading', downloadId: item.id, bytes: item.totalBytes };
+    return chrome.storage.session.set({ [key]: updated }).then(() =>
+      chrome.runtime.sendMessage({ target: 'download-page', type: 'download-started', taskId: task.taskId }).catch(() => {}),
+    );
+  }).catch(() => {});
+});
+
+chrome.downloads.onChanged.addListener(delta => {
+  if (!delta.state || !['complete', 'interrupted'].includes(delta.state.current)) return;
+  chrome.storage.session.get(null).then(entries => {
+    const match = Object.entries(entries).find(([key, task]) =>
+      key.startsWith('pending:') && task?.downloadId === delta.id,
+    );
+    if (!match) return;
+    const [key, task] = match;
+    const completed = delta.state.current === 'complete';
+    const updated = {
+      ...task,
+      status: completed ? 'complete' : 'failed',
+      ...(delta.error?.current && { error: `O Chrome interrompeu a gravação (${delta.error.current}).` }),
+    };
+    return chrome.storage.session.set({ [key]: updated }).then(() => Promise.all([
+      chrome.runtime.sendMessage({
+        target: 'download-page', type: 'download-finished',
+        taskId: task.taskId, status: updated.status,
+      }).catch(() => {}),
+      Number.isInteger(task.tabId) && chrome.tabs.sendMessage(task.tabId, {
+        target: 'youtube-download', type: 'download-task-finished',
+        taskId: task.taskId, status: updated.status, error: updated.error,
+      }).catch(() => {}),
+    ]));
+  }).catch(() => {});
+});
 
 function messageError(error) {
   const message = error instanceof Error ? error.message : '';
@@ -633,16 +688,99 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (sender.url?.split(/[?#]/)[0] !== extensionPage || !/^[\w-]{36}$/.test(taskId)) return;
     const key = `pending:${taskId}`;
     chrome.storage.session.get(key).then(async stored => {
-      const task = stored[key];
+      let task = stored[key];
+      if (task && Number.isInteger(sender.tab?.id)) {
+        if (Number.isInteger(task.helperTabId) && task.helperTabId !== sender.tab.id) {
+          sendResponse({ error: 'Este pedido já está aberto noutra página.' });
+          return;
+        }
+        if (!Number.isInteger(task.helperTabId)) {
+          task = { ...task, helperTabId: sender.tab.id };
+          await chrome.storage.session.set({ [key]: task });
+        }
+      }
       sendResponse(task ? { task } : { error: 'O pedido de download expirou. Volta ao vídeo e tenta novamente.' });
+    }).catch(error => sendResponse({ error: messageError(error) }));
+    return true;
+  }
+
+  if (message.type === 'download-page-state') {
+    const extensionPage = chrome.runtime.getURL('download.html');
+    const taskId = typeof message.taskId === 'string' ? message.taskId : '';
+    const allowed = ['preparing', 'transferring', 'muxing', 'ready', 'downloading', 'failed'];
+    if (sender.url?.split(/[?#]/)[0] !== extensionPage || !/^[\w-]{36}$/.test(taskId)
+      || !allowed.includes(message.status)) return;
+    const key = `pending:${taskId}`;
+    chrome.storage.session.get(key).then(async stored => {
+      const task = stored[key];
+      if (!task || task.helperTabId !== sender.tab?.id) {
+        sendResponse({ accepted: false });
+        return;
+      }
+      const objectUrl = message.status === 'ready' ? message.objectUrl : undefined;
+      if (objectUrl && !objectUrl.startsWith(`blob:${chrome.runtime.getURL('')}`)) {
+        sendResponse({ accepted: false });
+        return;
+      }
+      await chrome.storage.session.set({ [key]: {
+        ...task,
+        status: message.status,
+        ...(Number.isFinite(message.bytes) && { bytes: message.bytes }),
+        ...(objectUrl && { objectUrl }),
+        ...(message.status === 'failed' && typeof message.error === 'string'
+          && { error: message.error.slice(0, 300) }),
+      } });
+      sendResponse({ accepted: true });
+      if (message.status === 'failed' && Number.isInteger(task.tabId)) {
+        chrome.tabs.sendMessage(task.tabId, {
+          target: 'youtube-download', type: 'download-task-finished', taskId,
+          status: 'failed', error: message.error,
+        }).catch(() => {});
+      }
+    }).catch(error => sendResponse({ error: messageError(error) }));
+    return true;
+  }
+
+  if (message.type === 'download-task-state') {
+    const taskId = typeof message.taskId === 'string' ? message.taskId : '';
+    if (!/^[\w-]{36}$/.test(taskId) || !Number.isInteger(sender.tab?.id)) return;
+    const pendingKey = `pending:${taskId}`;
+    const sabrKey = `${sabrTaskPrefix}${taskId}`;
+    chrome.storage.session.get([pendingKey, sabrKey]).then(stored => {
+      const task = stored[pendingKey];
+      if (!task || task.tabId !== sender.tab.id) {
+        sendResponse({ error: 'A tarefa de download já não está disponível.' });
+        return;
+      }
+      const transfer = stored[sabrKey];
+      sendResponse({ state: {
+        status: task.status ?? (transfer?.status === 'running' ? 'transferring' : 'preparing'),
+        bytes: task.bytes ?? transfer?.bytes ?? 0,
+        error: task.error ?? transfer?.error,
+      } });
     }).catch(error => sendResponse({ error: messageError(error) }));
     return true;
   }
 
   if (message.type === 'finish-download-task') {
     if (sender.url?.split(/[?#]/)[0] !== chrome.runtime.getURL('download.html') || !/^[\w-]{36}$/.test(message.taskId ?? '')) return;
-    Promise.all([chrome.storage.session.remove(`pending:${message.taskId}`), chrome.storage.session.remove(`${sabrTaskPrefix}${message.taskId}`)])
-      .then(() => sendResponse({accepted:true})).catch(error => sendResponse({error:messageError(error)}));
+    chrome.storage.session.get(`pending:${message.taskId}`).then(async stored => {
+      const task = stored[`pending:${message.taskId}`];
+      if (!task || task.helperTabId !== sender.tab?.id) {
+        sendResponse({ accepted: false });
+        return;
+      }
+      if (task.status === 'complete') {
+        await chrome.storage.session.remove(`pending:${message.taskId}`);
+      } else {
+        await chrome.storage.session.set({ [`pending:${message.taskId}`]: {
+          ...task, helperTabId: undefined, objectUrl: undefined,
+        } });
+      }
+      await chrome.storage.session.remove(`${sabrTaskPrefix}${message.taskId}`);
+      sendResponse({ accepted: true });
+      if (Number.isInteger(sender.tab.id)) chrome.tabs.remove(sender.tab.id).catch(() => {});
+    }).catch(error => sendResponse({ error: messageError(error) }));
     return true;
   }
 

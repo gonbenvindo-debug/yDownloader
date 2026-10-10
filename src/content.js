@@ -12,6 +12,7 @@ let downloadIcon;
 let spinnerIcon;
 let downloading = false;
 let activeDownloadId = null;
+let activeTaskId = null;
 let menuPlayerData = null;
 const readPlayerData = createPlayerReader();
 
@@ -41,6 +42,60 @@ function setDownloading(value) {
   button.classList.toggle('yt-downloader-loading', value);
   icon.replaceChildren(value ? spinnerIcon : downloadIcon);
 }
+
+function showTaskResult(taskId, state, error) {
+  if (activeTaskId !== taskId) return;
+  activeTaskId = null;
+  setDownloading(false);
+  if (state === 'complete') {
+    button.title = 'Download entregue na pasta Transferências';
+    button.setAttribute('aria-label', button.title);
+    setTimeout(() => {
+      if (!downloading && button?.isConnected) {
+        button.title = 'Descarregar vídeo';
+        button.setAttribute('aria-label', button.title);
+      }
+    }, 5000);
+    return;
+  }
+  if (currentVideoId !== getVideoId()) return;
+  popup.style.display = 'block';
+  button.setAttribute('aria-expanded', 'true');
+  setStatus(error || 'A gravação foi interrompida. Volta a tentar esta resolução.');
+}
+
+async function monitorTask(taskId) {
+  while (activeTaskId === taskId) {
+    let result;
+    try { result = await chrome.runtime.sendMessage({ type: 'download-task-state', taskId }); }
+    catch {}
+    if (result?.error) {
+      showTaskResult(taskId, 'failed');
+      return;
+    }
+    const state = result?.state;
+    if (state?.status === 'complete' || state?.status === 'failed') {
+      showTaskResult(taskId, state.status, state.error);
+      return;
+    }
+    if (state?.status === 'muxing') {
+      button.title = 'A unir vídeo e áudio…';
+      button.setAttribute('aria-label', button.title);
+    } else if (state?.status === 'downloading') {
+      button.title = 'A guardar o ficheiro…';
+      button.setAttribute('aria-label', button.title);
+    } else {
+      button.title = 'A transferir o vídeo…';
+      button.setAttribute('aria-label', button.title);
+    }
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+}
+
+chrome.runtime.onMessage.addListener(message => {
+  if (message?.target === 'youtube-download' && message.type === 'download-task-finished')
+    showTaskResult(message.taskId, message.status, message.error);
+});
 
 async function monitorDownload(downloadId) {
   while (activeDownloadId === downloadId) {
@@ -145,8 +200,9 @@ function addResolution(resolution) {
       });
     }
     catch { result = { error: 'Não foi possível iniciar o download.' }; }
-    if (result?.opened) {
-      setDownloading(false);
+    if (result?.taskId) {
+      activeTaskId = result.taskId;
+      void monitorTask(result.taskId);
       return;
     }
     if (result?.error || !Number.isInteger(result?.downloadId)) {
